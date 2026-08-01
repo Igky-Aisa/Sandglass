@@ -1,0 +1,8 @@
+# Local config / secrets -- never commit
+.env
+
+# Sandglass runtime data (queue/history/response cache)
+.sandglass/
+
+# IDE
+.vscode/

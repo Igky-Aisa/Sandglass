@@ -1,0 +1,219 @@
+# Project Context
+
+> Full rules and protocol: see [master_plan/rules_for_every_promt.md](master_plan/rules_for_every_promt.md)
+> Full rules and protocol for backend and database: see [master_plan/rules_backend.md]
+
+> Architecture source of truth: see [master_plan/ECSP MASTER ARCHITECTURE V4.txt](<master_plan/ECSP MASTER ARCHITECTURE V4.txt>)
+> Current work state: see [master_plan/work_log.md](master_plan/work_log.md)
+
+## MANDATORY — Read before acting
+
+This is a regulation-safe domain platform (Flutter). Philosophy: **Determinism, Auditability, "Not-CRUD"** — non-negotiable. For any substantial code task, read first:
+
+1. `master_plan/SYSTEM_MAP.md` — **agent quick-reference**: current-state map of commands/handlers/routes/services/models/pages, deploy topology, and gotchas (read before grepping the tree). Keep it updated when connections change.
+2. `master_plan/ECSP MASTER ARCHITECTURE V4.txt` — authoritative architecture
+3. `master_plan/work_log.md` — current state, last session, known blockers
+4. `master_plan/rules_for_every_promt.md` — long-form protocol, rationale, examples
+
+(The essentials from those files are inlined below so they apply every prompt; read the source files for detail/rationale.)
+
+## Non-negotiables
+
+- **Backend is the ONLY DB client** — the FastAPI backend is the single component that talks to the database. Every other piece (Flutter operator console, public intake form, the local `esaas_declarator` SEC bot) reads/writes **only through the backend HTTP API**. No direct DB connections or DB credentials anywhere else. (Project-wide core rule; see `master_plan/PRODUCTION_DEPLOYMENT.md` §5/§8. The dev-only leads-sync job is the sole documented exception — do not generalize it.)
+- **E-Drafter is dual-target (standalone + ESaaS) from one codebase** — the Flutter app talks to exactly ONE seam (`ApiClient` / `/api/v1` HTTP); it must never import DB code, assume a DB, or contain ESaaS-specific branches. Drafting logic (scene model, tools, generator, DXF/PDF/XLSX/cuadro exporters) stays backend-agnostic and shared. Integration features are gated by `GET /capabilities`, not build forks. **Before touching the app↔backend boundary, persistence, auth, exporters, or integration, read [master_plan/EDRAFTER_DUAL_TARGET.md](master_plan/EDRAFTER_DUAL_TARGET.md).**
+  - **Current focus is the ESaaS-integrated E-Drafter.** We may ship features that assume the ESaaS backend (e.g. live geo/staticmap) *without* building the standalone equivalent yet — BUT every time you rely on something the standalone backend doesn't have, or take an ESaaS-only shortcut, you MUST record it in [master_plan/standalone_edrafter.md](master_plan/standalone_edrafter.md): what the feature needs, which standalone endpoint/capability is missing, and how it should be gated (`GET /capabilities`) so the standalone build degrades gracefully instead of breaking. Prefer capability-gating in code; when you skip it for speed, the gap goes in that file. Goal: build a fully functional ESaaS now without foreclosing a fully standalone E-Drafter later.
+- **No Silent Mutations** — no logic/design changes without explicit reasoning
+- **Command-Driven state** — all state changes follow Master Architecture
+- **Visual Excellence** — gradients, micro-animations, use `AppColors` and `Ico` classes
+- **Fix lint errors before claiming completion**
+- **Append a session report to `master_plan/work_log.md` at the end of every task** (format below)
+
+## Verify WHAT IS RUNNING before debugging logic
+
+When app behaviour contradicts the code you just read, **the code you read is
+often not the code that served the request.** Check these BEFORE re-reading
+logic, adding logging, or "fixing" anything — three separate bugs in one week
+(2026-07-26/28) were each misdiagnosed as a logic error and were all this:
+
+1. **Which backend is the frontend actually hitting?** `esaas_frontend` defaults
+   to `http://localhost:8000`; it only uses Cloud Run when launched with
+   `--dart-define=API_BASE_URL=<url>`. Confirm it, never assume it — a local
+   backend and the deployed one routinely run different code.
+2. **Is a local backend serving stale code?** A `uvicorn` process started before
+   your edit keeps the old route table and old logic until it is restarted.
+   Always run it with `--reload`.
+3. **Is your fix actually deployed?** `esaas_backend` **and `edrafter_core`**
+   reach Cloud Run only via `./deploy.sh <gcp-project>` (deploy.sh copies the
+   `edrafter_core` *working tree* into the image). Diff `git show HEAD:<file>`
+   against the working tree: **an uncommitted fix is not deployed — even if you
+   already applied its DB migration.** A half-applied change (migration live,
+   code not) looks exactly like a logic bug.
+
+**Prove which version answered; do not infer it.** `curl <base>/openapi.json`
+shows the live route table (params and methods included). For logic, run the
+case through the *installed* module. A test that passes against your working
+tree proves nothing about what production or a running local server is doing.
+
+## work_log.md session report — required format
+
+Append at the end of every task:
+
+```markdown
+## [Date] - [Agent Name] - [Task Title]
+
+### 1. Context Snapshot
+- **Goal**: [1-sentence goal]
+- **State**: [Current branch/module/file focus]
+- **Previous Blocker**: [What was resolved or remains]
+
+### 2. Work Done
+- [Key implementation details / architectural decisions / files modified]
+
+### 3. Next Steps (For the next agent)
+- [Specific point of resumption / known bugs / pending UX]
+```
+Focus on **why** a decision was made relative to the Architecture, not the obvious.
+
+## API SPEC comment rule
+
+Whenever you create a Button, GestureDetector, or any Widget that triggers a backend interaction, add this block immediately above the `onPressed`/`onTap` handler:
+
+```dart
+/* [API SPEC]
+- NAME: {Descriptive name of the action}
+- FUNCTIONALITY: {What happens in the UI}
+- ENDPOINT: {HTTP Method} {Proposed endpoint, e.g. POST /api/v1/resource}
+- REQUEST_BODY: {JSON sent to backend, or 'null'}
+- RESPONSE_BODY: {JSON of expected success response}
+*/
+```
+JSON keys should be based on the current widget's variables.
+
+## User manual rule — document what the OPERATOR can do
+
+Whenever you add or change anything the operator can **use or configure** — a
+button, menu item, dialog, toggle, settings field, keyboard shortcut, or a
+default that changes visible behaviour — document it in
+[master_plan/user_manual.md](master_plan/user_manual.md) **in the same task**,
+alongside the `work_log.md` entry. The work log explains *why* to the next
+agent; the user manual explains *how* to the person using the app.
+
+Write it for the OPERATOR, never for a developer:
+- **Where it is** — app → screen → panel/tab, using the **exact Spanish label**
+  shown in the UI, so it can be found without hunting.
+- **What it does**, in plain language. No file paths, class names, or endpoints.
+- **Gotchas / when NOT to use it** — the non-obvious part that would otherwise
+  turn into a support question later.
+
+Skip it for pure refactors, internal fixes, and backend changes with no visible
+surface. But if a fix **changes visible behaviour** (a new default, a moved or
+renamed control, a rule the operator must now follow), that IS user-facing —
+update the entry rather than staying silent.
+
+## "future prompts" trigger
+
+When I say **"future prompts"**: prompts are separated by lines containing `====` at start and end.
+
+1. Read the prompt at the **top** of `prompt_tools/future_prompts.md` and execute it.
+2. Then cut that executed prompt out of `future_prompts.md` and paste it into `prompt_tools/prompt_history.md`, leaving the next prompt at the top.
+3. When you start you excution , quote the prompt that you are working on it , cus the current display only shows "future prompts"
+
+When I say **"future prompts all"**
+1. execute all the prompts one by one in the `future_prompts.md` file, following the instructions above.
+
+**Per-prompt model:** if the top prompt's block starts with a `model: <name>` line followed by a blank line (e.g. `model: Opus`), that names the model it should run under.if you can switch your own model do it , just remind at the end of the response in the chat the model switch,and if you can't switch your own model — tell me to run `/model <name>` first if it doesn't match what I'm currently on. wait for 10 second for the switch and if it doesn't happend just keep using the model available for you Strip the header before treating the rest as the prompt body.
+
+**Relationship to `sandglass execute`:** the Sandglass CLI (`sandglass-cli/`) can also read `future_prompts.md` directly — if its queue is empty, `sandglass execute` auto-loads every `====` block from this same file and runs each one headlessly via `claude -p`, cutting completed ones into `history_prompts.md` the same way. These are two different execution paths over the same file, not duplicates of each other: saying "future prompts" to me means *I* run the top block myself, interactively, in this chat; running `sandglass execute` means it runs unattended through the CLI instead. Whichever processes a block first cuts it out, so a block is never run twice — but be intentional about which one you're asking for.
+
+## Session shutdown ritual — "may the force be with you"
+
+**Triggers** (any of): **"may the force be with you"** · **"live long and
+prosper"** · **"hasta la vista baby"** · **"good work good bye"**.
+
+Run the whole checklist, then report what actually happened at each step —
+including anything skipped and why. Never claim a step succeeded without
+checking; several bugs in this repo came from assuming a deploy landed.
+
+1. **Commit + push to `main`.** Stage everything, then **verify no secrets are
+   staged** (`.env`, `secrets/*`, `*-sa.json`, `*.pem` — check, don't assume),
+   commit with a real message, push the branch, then fast-forward `main` to it
+   with `git push origin <branch>:main`. Prefer that over checking `main` out:
+   a checkout of a branch many commits behind rewrites the whole working tree
+   for nothing.
+2. **Sync backend → Cloud Run.** `cd esaas_backend && ./deploy.sh ecsp-sheets-ingest`.
+   ⚠️ **This is a PRODUCTION deploy and it ships the WORKING TREE, committed or
+   not.** Say so before running it, and stop and ask if the tree holds anything
+   this session did not intend to ship. Afterwards **verify the new code is
+   live** (`curl <url>/openapi.json`) — an exit code of 0 is not proof.
+3. **Sync the database — SCHEMA ONLY.** `alembic upgrade head`, then confirm
+   `alembic current` == head. **"Sync" here NEVER means data**: do not copy,
+   dump, restore or overwrite rows between environments. If the chain contains
+   pending migrations this session did not author, name them and confirm before
+   applying. Note: `esaas_backend/.env` points at **Supabase prod**, so "local"
+   and "Supabase" are the same database today.
+4. **Docs current.** `master_plan/SYSTEM_MAP.md` (did any connection/topology
+   change?) and `master_plan/user_manual.md` (any new button, setting, shortcut
+   or changed default? — see the User manual rule), plus the usual
+   `work_log.md` session report.
+5. **Suggest a chat title** — one short line naming the one or two main pieces
+   of work. The auto-title comes from the first message and is almost always
+   wrong by the end of a session.
+6. **Sign off with a quote.** Cool, funny, intellectual or historical — **always
+   attributed** (film, book, person, event). **Vary it every single time**;
+   never reuse one, and let it echo how the session actually went. The trigger
+   phrases are Star Wars / Star Trek / Terminator — answering in kind is fair
+   game, so is going somewhere completely unexpected.
+
+## Prompt history
+
+Every prompt I input is logged to `prompt_tools/prompt_history.md` automatically by a `UserPromptSubmit` hook (see `.claude/`).
+
+## Flutter Development Rules
+
+### NO long test 
+- dont run dart analyze
+- dont run flutter test
+- dont run flutter analyze --no-fatal-infos
+- dont run flutter test --no-pub  
+- dont run flutter test --no-pub --coverage
+- dont run flutter test --no-pub --coverage --no-build-failures
+- dont run flutter test --no-pub --coverage --no-build-failures --no-build-failures
+- dont run flutter test --no-pub --coverage --no-build-failures --no-build-failures --no-build-failures 
+
+### Testing
+- Always use `flutter test --no-pub` — never bare `flutter test`
+- Run only affected test files unless full suite is explicitly requested
+
+## Token Efficiency Rules
+
+### Communication
+- No affirmations — skip "Great!", "Sure!", "Of course!", "Absolutely!"
+- No preamble — start responses with the answer or action directly
+- No summaries at the end unless explicitly asked
+- No restating what you're about to do — just do it
+
+
+### Code Output
+- When editing a file, show only the changed lines plus minimal context (3 lines max around the change)
+- Do not reprint entire files unless the change affects >70% of the file
+- For multi-file changes, show a single unified diff summary, not full file dumps
+- No inline comments explaining what standard Flutter/Dart patterns do
+
+### Planning & Reasoning
+- Reason silently — only surface conclusions and decisions, not the full reasoning chain
+- If a task has sub-steps, list them once briefly, then execute without narrating each one
+- Ask only one clarifying question at a time, only when genuinely blocked
+
+### ⚡ EFFICIENT WORKFLOW & TESTING RULES
+- **No Global Testing:** DO NOT run full test suites or exhaustive `flutter test` commands after code changes unless explicitly requested.
+- **Incremental Validation:** Only run tests specifically related to the modified files. If no unit test exists for the specific change, prioritize successful compilation over runtime testing.
+- **Flutter UI Focus:** For frontend/Flutter tasks, rely on static analysis (`flutter analyze`) rather than execution. Assume the developer will perform visual validation via Hot Reload.
+- **Fast Feedback Loop:** If a task requires verification, suggest a specific, targeted command rather than executing a broad one. 
+- **Time Boxing:** Never initiate any process (indexing, testing, or cleaning) that is expected to take more than 120 seconds without asking for confirmation.
+
+### English correction and prompt education
+- When I misspell or misphrase something, correct me — be direct, no need to soften it. Put the correction at the **end** of the response so it never blocks the actual answer.
+- Show how a native speaker would say what I meant: correct and natural, but everyday register (not overly formal — average, fluent speaker).
+- When my phrasing could be more natural, show **both**: what I wrote and your recommended version, so I can compare.
+- If a rephrasing would get a more specific or accurate result from you, tell me that too (prompt-writing tips, not just grammar).
+- Keep it brief. For a minor fix, just restate my prompt with the corrections in **bold** — no explanation needed.
