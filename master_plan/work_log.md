@@ -481,3 +481,19 @@ Docs: `README.md` (Features bullets, new "Push notifications" section, Auto-resu
 ### 3. Next Steps (For the next agent)
 - The prompt counts in the seeded `Progress.md` are a point-in-time snapshot; re-run "check progress" to refresh them — don't trust the numbers as they age.
 - No user-manual entry: this is an agent/dev convention with no operator-facing UI surface.
+
+## 2026-08-09 - Opus 5 - Cut 0.9.0 and refresh stale editable-install metadata
+
+### 1. Context Snapshot
+- **Goal**: `pip show sandglass` reported 0.7.0 while the source said 0.8.0. Diagnose and fix, and give the unreleased work a version.
+- **State**: 0.8.0 → 0.9.0 in `setup.py` + `sandglass/__init__.py`, CHANGELOG `[Unreleased]` cut as `[0.9.0] - 2026-08-09`, editable install refreshed. 96/96 tests pass.
+- **Previous Blocker**: None.
+
+### 2. Work Done
+- **The version was not drifting in source — this was stale install metadata.** `setup.py` and `__init__.py` both already said 0.8.0 and `sandglass version` (which reads `__version__`) reported it correctly; only `pip show` said 0.7.0, because an editable install's `dist-info` is written **once, at install time** and is never refreshed by a `git pull`. Worth remembering before "fixing" a version number that isn't wrong: the two numbers answer different questions — `sandglass version` is what the code says *now*, `pip show` is what the code said when `pip install -e .` last ran.
+- Bumped to **0.9.0** (minor, not patch: `[Unreleased]` contained a new command, `sandglass commands`, alongside the hourglass rework) and cut the CHANGELOG section with today's date.
+- Re-ran `pip install -e .` so the metadata matches; verified `sandglass version`, `pip show` **and** the editable path all agree afterwards, rather than assuming the reinstall preserved the editable link.
+
+### 3. Next Steps (For the next agent)
+- Version lives in **two** places (`setup.py`, `sandglass/__init__.py`) with nothing keeping them in sync — they happened to agree here, but a future bump that touches only one will produce a *real* drift that looks exactly like this session's fake one. If it bites once, make `setup.py` read `__version__` from the package instead of hardcoding it.
+- A `git pull` never needs a reinstall for code changes (editable install points at the working tree), but it **does** if `entry_points` or `install_requires` change in `setup.py`, and the pip metadata goes stale on any version bump. Cheap rule: re-run `pip install -e .` after pulling a change to `setup.py`.

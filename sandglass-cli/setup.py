@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="sandglass",
-    version="0.8.0",
+    version="0.9.0",
     description="Batch prompt queue executor for Claude",
     packages=find_packages(exclude=["tests", "tests.*"]),
     include_package_data=True,
