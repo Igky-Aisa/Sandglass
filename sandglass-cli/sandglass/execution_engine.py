@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -61,62 +62,150 @@ WORK_LOG_PATH = os.path.join("master_plan", "work_log.md")
 # folded into the same row instead of a separate caption line. Purely a
 # liveness indicator (like any spinner): it loops continuously and isn't
 # literally synced to the real remaining time, which the countdown text is.
+#
+# Motion follows master_plan/animation.md, i.e. how a real hourglass reads:
+#   * the TOP chamber empties from its surface DOWN -- the widest row (just
+#     under the top cap) clears first, not the row at the neck. The earlier
+#     version drained it neck-first, which is what made the loop look wrong.
+#   * a THIN STREAM of grains falls through the empty part of the bottom
+#     cone, one grain every other row, shifting down each tick, so the glass
+#     reads as "flowing" between level changes.
+#   * the BOTTOM chamber fills from the BOTTOM UP, one grain at a time, as a
+#     heap growing outward from the centre of the lowest row -- so most
+#     frames show a PARTIALLY filled row rather than whole rows snapping full.
+# The rounded caps are the glass itself, not sand: the bottom line stays an
+# unbroken `╰─────╯` in every frame and the heap piles up ON it. (The spec
+# drawing fills its own base, `(_________)` -> `(:::::::::)`, only because
+# plain ASCII can't draw a rounded cap *and* sand sitting on top of it.)
 _HOURGLASS_WIDTH = 7
 _HOURGLASS_HALF = 3  # rows per triangle half -- animation is 9 lines total
 # (rounded cap + 3 top + neck + 3 bottom + rounded cap), a compact block.
-_HOURGLASS_LEVELS = _HOURGLASS_HALF + 1  # discrete sand levels, 0..HALF
-_TICKS_PER_LEVEL = 2  # neck-grain flicker states shown before the level advances
-ANIMATION_TICK_SECONDS = 0.35
+# Interior width of each cone row, widest first: (5, 3, 1) at width 7. The
+# top drains and the bottom fills in that same order -- widest row first --
+# so the two halves hold exactly the same amount of sand and the pour is
+# conserved rather than merely mirrored.
+_ROW_CELLS = tuple(_HOURGLASS_WIDTH - 2 - 2 * i for i in range(_HOURGLASS_HALF))
+_BOTTOM_CELLS = sum(_ROW_CELLS)  # grains the bottom cone holds, one per cell
+_SUBSTEPS_PER_LEVEL = 2  # a top row goes full (':') -> half ('.') -> empty
+_TOP_SUBSTEPS = _HOURGLASS_HALF * _SUBSTEPS_PER_LEVEL
+# The two halves move at different granularities (6 half-rows up top, 9
+# grains down below), so progress is counted in a shared unit that divides
+# both; each side then advances on its own beat without drifting out of step
+# or running out early.
+_PROGRESS_UNITS = math.lcm(_TOP_SUBSTEPS, _BOTTOM_CELLS)
+_TICKS_PER_UNIT = 1
+# A few still ticks at the end (poured out, nothing falling) so the loop's
+# wrap reads as the glass being flipped rather than as a glitch mid-pour.
+_SETTLE_TICKS = 3
+_CYCLE_TICKS = _PROGRESS_UNITS * _TICKS_PER_UNIT + _SETTLE_TICKS
+_FALL_PHASES = 2  # grain every other row; the pattern shifts by one per tick
+# Slower than a spinner on purpose: this marks a wait measured in minutes or
+# hours, so a full pour takes _CYCLE_TICKS * this (~10s) instead of ~3s.
+ANIMATION_TICK_SECONDS = 0.5
+
+_SAND_FULL = ":"
+_SAND_LOOSE = "."  # a half-drained top row, or a grain still on the move
+_SAND_EMPTY = " "
 
 
 def _hourglass_frame(tick: int, caption: str = "") -> str:
     """One frame of the looping ASCII hourglass, keyed only by a tick counter.
 
-    `tick` increases once per animation step and wraps forever -- the sand
-    level (which triangle row is drained/filled) advances every
-    `_TICKS_PER_LEVEL` ticks. The neck itself is rendered as `)*(` / `).(` --
-    the parens read as the pinched waist of the glass, with a flickering
-    grain between them for a "still flowing" look even while the level
-    itself is unchanged. `caption`, if given, is appended to the neck row
-    (e.g. a live countdown) so the whole indicator stays a single compact
-    block, not two.
+    `tick` increases once per animation step and wraps forever. The falling
+    stream shifts one row per tick; the top chamber thins by half a row every
+    third tick, and a grain lands on the bottom heap every second one.
+
+    The neck is rendered as `)*(` / `).(` -- the parens read as the pinched
+    waist of the glass, with a flickering grain between them for a "still
+    flowing" look even while the level itself is unchanged. `caption`, if
+    given, is appended to the neck row (e.g. a live countdown) so the whole
+    indicator stays a single compact block, not two.
     """
-    step = tick % (_HOURGLASS_LEVELS * _TICKS_PER_LEVEL)
-    level = step // _TICKS_PER_LEVEL
-    grain_on = (step % _TICKS_PER_LEVEL) == 0
+    step = tick % _CYCLE_TICKS
+    poured = min(step // _TICKS_PER_UNIT, _PROGRESS_UNITS)
+    # The trailing ticks: everything has poured, nothing is falling.
+    settled = step >= _PROGRESS_UNITS * _TICKS_PER_UNIT
+    phase = step % _FALL_PHASES
+
+    top_substeps = poured * _TOP_SUBSTEPS // _PROGRESS_UNITS
+    rows_drained = top_substeps // _SUBSTEPS_PER_LEVEL
+    half_drained = (top_substeps % _SUBSTEPS_PER_LEVEL) == 1
+    grains = poured * _BOTTOM_CELLS // _PROGRESS_UNITS
+
+    center = _HOURGLASS_WIDTH // 2
 
     def bounds(i: int) -> tuple[int, int]:
         return i, _HOURGLASS_WIDTH - 1 - i
 
-    lines = []
-    lines.append("╭" + "─" * (_HOURGLASS_WIDTH - 2) + "╮")
+    def top_sand(row: int) -> str:
+        """Top chamber, row 0 = widest (at the cap) = first to empty."""
+        if row < rows_drained:
+            return _SAND_EMPTY
+        if row == rows_drained and half_drained:
+            return _SAND_LOOSE
+        return _SAND_FULL
+
+    def heap(row: int) -> tuple[set[int], int | None]:
+        """Columns of settled sand in a bottom row, plus the newest grain.
+
+        Rows fill widest-first (row 0 rests on the base line), and within a
+        row the heap grows outward from the centre -- so a row in progress
+        is drawn as a partial mound instead of all-or-nothing.
+        """
+        width = _ROW_CELLS[row]
+        below = sum(_ROW_CELLS[:row])
+        filled = max(0, min(width, grains - below))
+        if filled == 0:
+            return set(), None
+        edge = row + 1  # first interior column of this row
+        cols = set(range(edge + (width - filled) // 2, edge + (width + filled) // 2))
+        if below + filled != grains:
+            return cols, None  # fully settled; a row above holds the newest grain
+        previous = edge + (width - filled + 1) // 2
+        return cols, next(iter(cols - set(range(previous, previous + filled - 1))), None)
+
+    def has_grain(rows_below_neck: int) -> bool:
+        return not settled and (rows_below_neck + phase) % _FALL_PHASES == 0
+
+    lines = ["╭" + "─" * (_HOURGLASS_WIDTH - 2) + "╮"]
+
     for i in range(_HOURGLASS_HALF):
         left, right = bounds(i)
         row = [" "] * _HOURGLASS_WIDTH
         row[left], row[right] = "\\", "/"
-        drained = i >= (_HOURGLASS_HALF - level)
-        fill = " " if drained else ":"
+        fill = top_sand(i)
         for c in range(left + 1, right):
             row[c] = fill
         lines.append("".join(row))
+
     neck = [" "] * _HOURGLASS_WIDTH
-    center = _HOURGLASS_WIDTH // 2
     neck[center - 1] = ")"
-    neck[center] = "*" if grain_on else "."
+    neck[center] = "." if settled else ("*" if phase == 0 else ".")
     neck[center + 1] = "("
     neck_line = "".join(neck)
     if caption:
         neck_line += f"  {caption}"
     lines.append(neck_line)
+
+    # Bottom cone, drawn top-down (i counts back from the neck) but filled
+    # bottom-up, so this loop runs in reverse of the fill order.
     for i in reversed(range(_HOURGLASS_HALF)):
         left, right = bounds(i)
         row = [" "] * _HOURGLASS_WIDTH
         row[left], row[right] = "/", "\\"
-        filled = i >= (_HOURGLASS_HALF - level)
-        fill = ":" if filled else " "
-        for c in range(left + 1, right):
-            row[c] = fill
+        cols, newest = heap(i)
+        for c in cols:
+            row[c] = _SAND_FULL
+        # The grain that just landed is still loose; by the settle frames
+        # everything has come to rest.
+        if newest is not None and not settled:
+            row[newest] = _SAND_LOOSE
+        # The stream only shows where there is still air: once the heap
+        # reaches a row's centre it has buried the channel.
+        if center not in cols and has_grain(_HOURGLASS_HALF - 1 - i):
+            row[center] = _SAND_LOOSE
         lines.append("".join(row))
+
     lines.append("╰" + "─" * (_HOURGLASS_WIDTH - 2) + "╯")
     return "\n".join(lines)
 
@@ -335,8 +424,8 @@ class ExecutionEngine:
         on exit, matching `execute_prompt`'s progress spinner); piped to a
         file or captured by a test, Rich's `Live` detects the non-terminal
         output and prints nothing per frame -- verified directly rather than
-        assumed, since a multi-hour wait ticking every ~0.35s would otherwise
-        flood a redirected log with thousands of frames.
+        assumed, since a multi-hour wait ticking every ANIMATION_TICK_SECONDS
+        would otherwise flood a redirected log with thousands of frames.
         """
         when = f" (expected around {resume_at})" if resume_at else ""
         console.print(

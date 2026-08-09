@@ -291,10 +291,17 @@ prompt into chat yourself. By default, `sandglass execute`:
    refreshes**, adds a 2-minute safety buffer (retrying right at the exact
    boundary risks hitting the same limit again before the window has really
    rolled over), and waits until then, showing a small live animated ASCII
-   sandglass in your terminal — five compact lines, sized like a spinner
-   rather than a big block, with the sand level in motion and a flickering
-   grain between the pinched `)*(` neck, plus a live countdown folded right
-   in — so a multi-hour wait never looks like it froze. If output is piped
+   sandglass in your terminal — nine compact lines, sized like a spinner
+   rather than a big block, with a live countdown folded right in — so a
+   multi-hour wait never looks like it froze. It pours the way a real
+   hourglass does: the **top chamber empties from the top down**, thinning
+   from `:` to `.` before a row clears; a thin **stream of grains falls**
+   through the neck; and the **bottom chamber fills from the base up**, one
+   grain at a time, piling into a heap that spreads out from the middle of
+   the lowest row. When it has all poured it holds still for a moment, then
+   flips and starts over. A full pour takes about ten seconds —
+   deliberately unhurried, since what you are waiting on is measured in
+   minutes or hours. If output is piped
    or redirected to a file instead of a real terminal, the animation doesn't
    print at all — just the start and resume messages — so it never floods a
    log with thousands of frames.
@@ -313,17 +320,22 @@ Expected to refresh at 2026-07-22T21:15:00+00:00.
 Waiting 42.0 min for quota to refresh (expected around 2026-07-22T21:15:00+00:00). Press Ctrl-C to stop (queue stays intact).
 
 ╭─────╮
-\:::::/
+\     /
  \:::/
-  \ /
+  \:/
   )*(    41.6 min remaining
-  /:\
+  /.\
  /   \
-/     \
+/ ::. \
 ╰─────╯
 
 ⌛ Resuming — retrying the queue now.
 ```
+
+(That is one frame mid-pour: the top row has emptied, a grain is falling
+through the cone, and three have piled up at the bottom — the last one still
+loose. The rounded top and bottom lines are the glass itself, so they stay
+unbroken; the sand piles up *on* the base, never through it.)
 
 If Claude Code doesn't report an exact refresh time, it falls back to
 checking every 15 minutes instead (`--poll-interval` to change that). See

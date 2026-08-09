@@ -224,8 +224,11 @@ yourself and waiting. Instead, by default:
    came from, so the gap between "started" and "eventually completed" is never silent.
 2. Sandglass reads the exact refresh time Claude Code reports (`rate_limit_event` /
    `resetsAt`) and waits until then — showing a small live animated ASCII sandglass in
-   your terminal (5 compact lines, spinner-sized, with a live countdown folded in) so a
-   multi-hour wait never looks frozen. (Piped or redirected output shows just the
+   your terminal (9 compact lines, spinner-sized, with a live countdown folded in) so a
+   multi-hour wait never looks frozen. It pours like the real thing: top chamber drains
+   from the top down, a thin stream of grains falls through the neck, and the bottom
+   fills from the base up a grain at a time, heaping outward from the middle, ~10s per
+   pour. (Piped or redirected output shows just the
    start/resume messages, no animation spam.) A 2-minute safety buffer is added on top
    of the reported refresh time, since retrying right at the exact boundary risks
    hitting the same quota again before the server-side window has actually rolled over.

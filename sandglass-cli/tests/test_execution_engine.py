@@ -9,10 +9,14 @@ from sandglass.execution_engine import (
     SUMMARY_MAX,
     WORK_LOG_PATH,
     ExecutionEngine,
+    _BOTTOM_CELLS,
+    _CYCLE_TICKS,
     _HOURGLASS_HALF,
-    _HOURGLASS_LEVELS,
     _HOURGLASS_WIDTH,
-    _TICKS_PER_LEVEL,
+    _PROGRESS_UNITS,
+    _ROW_CELLS,
+    _TICKS_PER_UNIT,
+    _TOP_SUBSTEPS,
     _hourglass_frame,
 )
 from sandglass.models import Response
@@ -305,49 +309,152 @@ def test_execute_queue_omits_what_has_been_done_when_nothing_completed(qm, capsy
     assert "what has been done:" not in out
 
 
+NECK_ROW = _HOURGLASS_HALF + 1  # +1 for the rounded top cap
+SETTLED_TICK = _PROGRESS_UNITS * _TICKS_PER_UNIT  # first poured-out, still frame
+TOP_CAP = "╭" + "─" * (_HOURGLASS_WIDTH - 2) + "╮"
+BASE_LINE = "╰" + "─" * (_HOURGLASS_WIDTH - 2) + "╯"
+
+
+def _top_rows(tick):
+    """Top chamber rows, widest (nearest the cap) first."""
+    return _hourglass_frame(tick).split("\n")[1 : 1 + _HOURGLASS_HALF]
+
+
+def _bottom_rows(tick):
+    """Bottom cone rows, widest (resting on the base line) first."""
+    rows = _hourglass_frame(tick).split("\n")[NECK_ROW + 1 : 2 * _HOURGLASS_HALF + 2]
+    return rows[::-1]  # drawn narrowest-first; fill order is the reverse
+
+
+def _sand_columns(row):
+    return {i for i, char in enumerate(row) if char in ":."}
+
+
+def _tick_when_grains(n):
+    """First tick at which `n` grains have landed in the bottom cone."""
+    # grains == poured * _BOTTOM_CELLS // _PROGRESS_UNITS, so invert that.
+    return -(-n * _PROGRESS_UNITS // _BOTTOM_CELLS) * _TICKS_PER_UNIT
+
+
 def test_hourglass_frame_is_a_compact_rectangle_across_ticks():
     # rounded top cap + top rows + neck + bottom rows + rounded bottom cap
     expected_lines = 2 * _HOURGLASS_HALF + 3
     assert expected_lines <= 9  # compact, spinner-sized -- not a big block
-    for tick in range(_HOURGLASS_LEVELS * _TICKS_PER_LEVEL):
+    for tick in range(_CYCLE_TICKS):
         lines = _hourglass_frame(tick).split("\n")
         assert len(lines) == expected_lines
         assert all(len(line) == _HOURGLASS_WIDTH for line in lines)
 
 
+def test_hourglass_caps_are_glass_and_are_never_broken_by_sand():
+    # The rounded caps draw the glass itself: sand piles up *on* the base
+    # line, it never replaces part of it, and no falling grain punches
+    # through it either.
+    for tick in range(_CYCLE_TICKS):
+        lines = _hourglass_frame(tick).split("\n")
+        assert lines[0] == TOP_CAP
+        assert lines[-1] == BASE_LINE
+
+
 def test_hourglass_frame_starts_full_top_empty_bottom():
-    lines = _hourglass_frame(0).split("\n")  # index 0 is the rounded top cap
-    top_rows = lines[1 : 1 + _HOURGLASS_HALF]
-    bottom_rows = lines[_HOURGLASS_HALF + 2 : 2 * _HOURGLASS_HALF + 2]
-
-    assert all(":" in row for row in top_rows)
-    assert all(":" not in row for row in bottom_rows)
+    assert all(":" in row for row in _top_rows(0))
+    assert all(":" not in row for row in _bottom_rows(0))
 
 
-def test_hourglass_frame_ends_empty_top_full_bottom():
-    last_level_tick = _HOURGLASS_HALF * _TICKS_PER_LEVEL
-    lines = _hourglass_frame(last_level_tick).split("\n")
-    top_rows = lines[1 : 1 + _HOURGLASS_HALF]
-    bottom_rows = lines[_HOURGLASS_HALF + 2 : 2 * _HOURGLASS_HALF + 2]
+def test_hourglass_frame_ends_empty_top_and_full_bottom():
+    top = _top_rows(SETTLED_TICK)
+    bottom = _bottom_rows(SETTLED_TICK)
 
-    assert all(":" not in row for row in top_rows)
-    assert all(":" in row for row in bottom_rows)
+    assert all(":" not in row and "." not in row for row in top)
+    # Every cell of the cone holds settled sand -- nothing loose, nothing
+    # falling; that stillness is what makes the wrap read as a flip.
+    for row, cells in zip(bottom, _ROW_CELLS):
+        assert row.count(":") == cells
+        assert "." not in row
 
 
-def test_hourglass_frame_neck_flickers_within_a_level():
-    neck_row = _HOURGLASS_HALF + 1  # +1 for the rounded top cap
+def test_hourglass_top_drains_from_the_surface_down():
+    # Halfway through the pour the widest row (under the cap) is the one
+    # that cleared -- draining neck-first is what made the old loop read
+    # wrong, since the sand surface appeared to rise.
+    top = _top_rows(_PROGRESS_UNITS // 2 * _TICKS_PER_UNIT)
 
-    frame_a = _hourglass_frame(0).split("\n")[neck_row]
-    frame_b = _hourglass_frame(1).split("\n")[neck_row]
+    assert ":" not in top[0] and "." not in top[0]
+    assert ":" in top[-1]
+
+
+def test_hourglass_bottom_fills_from_the_bottom_up():
+    # The row resting on the base line fills first and completely; the rows
+    # above it hold no sand yet -- anything on them is the falling stream
+    # passing through the centre channel, never a settled grain.
+    center = _HOURGLASS_WIDTH // 2
+    bottom = _bottom_rows(_tick_when_grains(_ROW_CELLS[0]))
+
+    assert len(_sand_columns(bottom[0])) == _ROW_CELLS[0]
+    for row in bottom[1:]:
+        assert ":" not in row
+        assert _sand_columns(row) <= {center}
+
+
+def test_hourglass_bottom_rows_fill_partially_as_a_heap_from_the_centre():
+    center = _HOURGLASS_WIDTH // 2
+    widths = [len(_sand_columns(_bottom_rows(_tick_when_grains(n))[0])) for n in (1, 2, 3)]
+
+    # A row is not all-or-nothing: it grows a grain at a time...
+    assert widths == [1, 2, 3]
+    # ...outward from the centre, staying a single contiguous mound.
+    for n in range(1, _ROW_CELLS[0] + 1):
+        cols = _sand_columns(_bottom_rows(_tick_when_grains(n))[0])
+        assert center in cols
+        assert cols == set(range(min(cols), min(cols) + n))
+
+
+def test_hourglass_top_row_thins_before_it_clears():
+    # The top's own partial state: a row goes ':' -> '.' -> gone, so the
+    # chamber lightens gradually instead of snapping empty.
+    seen = {_top_rows(tick * _TICKS_PER_UNIT)[0].strip("\\/") for tick in range(_PROGRESS_UNITS)}
+
+    assert ":" * (_HOURGLASS_WIDTH - 2) in seen
+    assert "." * (_HOURGLASS_WIDTH - 2) in seen
+    assert " " * (_HOURGLASS_WIDTH - 2) in seen
+
+
+def test_hourglass_stream_falls_through_the_empty_bottom_cone():
+    center = _HOURGLASS_WIDTH // 2
+    grain_rows = {
+        tick: {i for i, row in enumerate(_bottom_rows(tick)) if row[center] == "."}
+        for tick in (0, 1)
+    }
+
+    # Every other row carries a grain, and the pattern shifts by one row per
+    # tick -- that shift is what reads as sand falling.
+    assert grain_rows[0] and grain_rows[1]
+    assert grain_rows[0].isdisjoint(grain_rows[1])
+    assert grain_rows[0] | grain_rows[1] == set(range(_HOURGLASS_HALF))
+
+
+def test_hourglass_stream_stops_once_everything_has_poured():
+    assert _hourglass_frame(SETTLED_TICK) == _hourglass_frame(SETTLED_TICK + 1)
+
+
+def test_hourglass_pour_is_conserved_between_the_two_halves():
+    # Both halves hold the same amount of sand, so the glass is never
+    # visibly emptier or fuller than it started.
+    assert sum(_ROW_CELLS) == _BOTTOM_CELLS
+    assert _PROGRESS_UNITS % _BOTTOM_CELLS == 0
+    assert _PROGRESS_UNITS % _TOP_SUBSTEPS == 0
+
+
+def test_hourglass_frame_neck_flickers_while_sand_is_flowing():
+    frame_a = _hourglass_frame(0).split("\n")[NECK_ROW]
+    frame_b = _hourglass_frame(1).split("\n")[NECK_ROW]
 
     assert frame_a != frame_b
     assert {frame_a.strip(), frame_b.strip()} == {")*(", ").("}
 
 
 def test_hourglass_frame_neck_is_pinched_with_parens():
-    neck_row = _HOURGLASS_HALF + 1
-
-    neck = _hourglass_frame(0).split("\n")[neck_row]
+    neck = _hourglass_frame(0).split("\n")[NECK_ROW]
 
     assert neck.strip().startswith(")")
     assert neck.strip()[:3].endswith("(")
@@ -355,19 +462,15 @@ def test_hourglass_frame_neck_is_pinched_with_parens():
 
 
 def test_hourglass_frame_appends_caption_to_the_neck_row_only():
-    neck_row = _HOURGLASS_HALF + 1  # +1 for the rounded top cap
-
     lines = _hourglass_frame(0, caption="1.2 min remaining").split("\n")
 
-    assert "1.2 min remaining" in lines[neck_row]
-    assert all("min remaining" not in line for i, line in enumerate(lines) if i != neck_row)
+    assert "1.2 min remaining" in lines[NECK_ROW]
+    assert all("min remaining" not in line for i, line in enumerate(lines) if i != NECK_ROW)
 
 
 def test_hourglass_frame_cycle_wraps_around():
-    cycle_length = _HOURGLASS_LEVELS * _TICKS_PER_LEVEL
-
-    assert _hourglass_frame(0) == _hourglass_frame(cycle_length)
-    assert _hourglass_frame(3) == _hourglass_frame(3 + cycle_length)
+    assert _hourglass_frame(0) == _hourglass_frame(_CYCLE_TICKS)
+    assert _hourglass_frame(3) == _hourglass_frame(3 + _CYCLE_TICKS)
 
 
 def test_sleep_with_animation_waits_the_full_duration_and_prints_start_end(qm, capsys):

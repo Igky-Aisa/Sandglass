@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Quota-wait hourglass animation reworked to pour like a real hourglass**, per `master_plan/animation.md`. Three separate things were wrong with the old loop, all of which made it read as "incoherent" rather than as sand falling: the top chamber drained **neck-first** (so the sand surface rose instead of dropping), the bottom chamber filled **top-down** (sand piling up in mid-air below the neck instead of on the base), and there was no stream between the two — only the neck grain flickered. Now: the top empties from its surface **down** (widest row, under the cap, clears first, thinning `:` → `.` before it goes); a thin **stream of grains falls** through the empty part of the bottom cone, one grain every other row shifting down a row per tick; and the bottom fills **from the base up, one grain at a time**, each row growing as a heap outward from its centre so most frames show a *partially* filled row rather than whole rows snapping full. The last grain to land is drawn loose (`.`) and settles (`:`) once the next one arrives, so the falling grain, the landing grain and the settled pile are visually one continuous thing.
+- **The rounded caps are glass, not sand.** `╭─────╮` and `╰─────╯` are now byte-identical in every frame — sand piles up *on* the base line and never replaces part of it, and no falling grain punches through it. (The spec drawing fills its own base, `(_________)` → `(:::::::::)`, only because plain ASCII has no way to draw a rounded cap *and* sand resting on it; an earlier pass in this same batch took that literally and broke the line.) The bottom cone therefore holds the sand, and it now fills completely: 9 cells (5 + 3 + 1 interior columns) against 9 in the top, so the pour is conserved rather than merely mirrored.
+- **Slowed down, ~2.8s → ~10.5s per pour.** `ANIMATION_TICK_SECONDS` 0.35 → 0.5, and the per-grain/per-half-row granularity above replaces the old four-state whole-row loop — that finer granularity, not just the longer sleep, is what makes it gradual rather than steppy. A cycle ends with three still ticks (fully poured, nothing falling) so the wrap reads as the glass being flipped rather than as a glitch mid-pour. The two halves move at different granularities (6 half-rows up top, 9 grains below), so progress is counted in `_PROGRESS_UNITS = lcm(6, 9) = 18` shared units; `_TICKS_PER_LEVEL`/`_HOURGLASS_LEVELS` are gone, replaced by `_ROW_CELLS`/`_BOTTOM_CELLS`/`_TOP_SUBSTEPS`/`_PROGRESS_UNITS`.
+- Unchanged on purpose: the 9-line compact size, the rounded caps, the pinched `)*(` / `).(` neck, and the countdown folded into the neck row.
+
 ## [0.8.0] - 2026-07-31
 
 ### Added
