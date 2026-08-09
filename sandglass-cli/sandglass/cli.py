@@ -51,6 +51,31 @@ def version() -> None:
     typer.echo(f"sandglass {__version__}")
 
 
+@app.command()
+def commands() -> None:
+    """List every available command, grouped by top-level and subcommand."""
+    root = typer.main.get_command(app)
+
+    table = Table(title="Sandglass Commands")
+    table.add_column("Command", style="cyan", no_wrap=True)
+    table.add_column("Description")
+
+    def add_rows(cmd, prefix: str) -> None:
+        sub_commands = getattr(cmd, "commands", None)
+        if sub_commands:
+            for name, sub in sorted(sub_commands.items()):
+                add_rows(sub, f"{prefix} {name}".strip())
+        else:
+            help_text = (cmd.get_short_help_str() or "").strip()
+            table.add_row(f"sandglass {prefix}", help_text)
+
+    for name, cmd in sorted(root.commands.items()):
+        add_rows(cmd, name)
+
+    console.print(table)
+    console.print("[dim]Run `sandglass <command> --help` for options on any command.[/dim]")
+
+
 # --- project scaffolding ----------------------------------------------------
 
 

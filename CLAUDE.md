@@ -125,6 +125,30 @@ When I say **"future prompts all"**
 
 **Relationship to `sandglass execute`:** the Sandglass CLI (`sandglass-cli/`) can also read `future_prompts.md` directly — if its queue is empty, `sandglass execute` auto-loads every `====` block from this same file and runs each one headlessly via `claude -p`, cutting completed ones into `history_prompts.md` the same way. These are two different execution paths over the same file, not duplicates of each other: saying "future prompts" to me means *I* run the top block myself, interactively, in this chat; running `sandglass execute` means it runs unattended through the CLI instead. Whichever processes a block first cuts it out, so a block is never run twice — but be intentional about which one you're asking for.
 
+## "check progress" trigger — measure against the master plan
+
+When I say **"check progress"** (or **"progress"**), report where the project
+stands against its own plan, then record it. Do all three:
+
+1. **Against the main idea.** Read
+   [master_plan/MASTER_ARQ_SYSTEM_MAP.md](<master_plan/MASTER_ARQ_SYSTEM_MAP.md>)
+   — the architecture / system map that defines what the finished system is
+   supposed to be (its components and Implementation Phases). Judge how much of
+   that is actually built vs still pending. This is the qualitative half: *are
+   we building the right thing, and how far along the plan are we?*
+2. **Prompt throughput.** Count the `====`-delimited blocks still queued in
+   `prompt_tools/future_prompts.md` (remaining) and the executed entries in
+   `prompt_tools/prompt_history.md` (done). Report done, remaining, total, and a
+   percentage — e.g. `16 done / 1 remaining (17 total, 94%)`. These are the two
+   ends of one pipeline: a block leaves `future_prompts.md` and lands in
+   `prompt_history.md` when it completes (see the "future prompts" trigger).
+3. **Write it down.** Update
+   [master_plan/Progress.md](<master_plan/Progress.md>) with the result —
+   overwrite the live snapshot at the top (date + who), don't just pile on
+   noise. Keep it short: the master-plan standing, the prompt counts, and any
+   blocker worth flagging. `Progress.md` is the at-a-glance status file — it is
+   NOT the work_log (that stays the per-task narrative in `work_log.md`).
+
 ## Session shutdown ritual — "may the force be with you"
 
 **Triggers** (any of): **"may the force be with you"** · **"live long and

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`sandglass commands`.** Prints a table of every command — top-level and nested (`queue *`, `responses *`) — with its one-line description. Introspects the live Typer/Click app tree rather than a hardcoded list, so it can't drift out of sync as commands are added. `sandglass <command> --help` still gives full per-command option help.
+
 ### Changed
 
 - **Quota-wait hourglass animation reworked to pour like a real hourglass**, per `master_plan/animation.md`. Three separate things were wrong with the old loop, all of which made it read as "incoherent" rather than as sand falling: the top chamber drained **neck-first** (so the sand surface rose instead of dropping), the bottom chamber filled **top-down** (sand piling up in mid-air below the neck instead of on the base), and there was no stream between the two — only the neck grain flickered. Now: the top empties from its surface **down** (widest row, under the cap, clears first, thinning `:` → `.` before it goes); a thin **stream of grains falls** through the empty part of the bottom cone, one grain every other row shifting down a row per tick; and the bottom fills **from the base up, one grain at a time**, each row growing as a heap outward from its centre so most frames show a *partially* filled row rather than whole rows snapping full. The last grain to land is drawn loose (`.`) and settles (`:`) once the next one arrives, so the falling grain, the landing grain and the settled pile are visually one continuous thing.

@@ -464,3 +464,20 @@ Docs: `README.md` (Features bullets, new "Push notifications" section, Auto-resu
 ### 3. Next Steps (For the next agent)
 - Two invariants the tests pin, and the reason each exists: **caps never change** (an earlier version broke the base line), and **`_PROGRESS_UNITS` is divisible by both `_TOP_SUBSTEPS` and `_BOTTOM_CELLS`** (otherwise integer division makes one half finish before the other and the pour stops looking conserved). If the glass is ever resized, both still hold — `_ROW_CELLS` is derived from the width/height constants — but re-run the hourglass tests, they are cheap.
 - `.` is deliberately overloaded: falling grain, just-landed grain, and half-drained top row. That is a feature (one continuous material), not an oversight — a test asserting "no `.` anywhere in row X" will be ambiguous, so assert on *columns* (`_sand_columns`) and on the centre channel instead, as the current tests do.
+
+## 2026-08-09 - Opus 4.8 - "check progress" rule + Progress.md
+
+### 1. Context Snapshot
+- **Goal**: Add a CLAUDE.md rule that reports project progress (against `MASTER_ARQ_SYSTEM_MAP.md` + prompt done/remaining counts), writes it to `master_plan/Progress.md`, and ships in the `new-claude-project` scaffold.
+- **State**: `CLAUDE.md` (working + bundled template), `master_plan/Progress.md` (new), `templates/master_plan/Progress.md` (new).
+- **Previous Blocker**: None.
+
+### 2. Work Done
+- Added a **"check progress" trigger** section to `CLAUDE.md` (inserted before the shutdown ritual). It does three things: (1) qualitative standing vs `MASTER_ARQ_SYSTEM_MAP.md`'s components/Implementation Phases, (2) quantitative done/remaining/percent from `====` blocks in `prompt_tools/{future_prompts,prompt_history}.md` — the two ends of the same pipeline the "future prompts" trigger already moves blocks along, (3) overwrite the live snapshot in `master_plan/Progress.md`. Explicitly scoped it *against* `work_log.md` so the two files don't collapse into one: Progress.md is the at-a-glance status, work_log stays the per-task narrative.
+- **Scaffold propagation** was the real point of the request. `new-claude-project` reproduces `master_plan/` filenames as *empty* files (`open(path,"a").close()` — template content is never copied for those dirs), so making it scaffold `Progress.md` meant adding the *filename* to `templates/master_plan/`, not seeding content there. Created `templates/master_plan/Progress.md` as a 0-byte file to match the other template master_plan files.
+- CLAUDE.md is copied verbatim by the scaffold and was byte-identical to the bundled template, so synced the rule by `cp CLAUDE.md templates/CLAUDE.md` (verified identical) rather than editing twice and risking drift. `claude-md-update` would do the same, but a direct copy needs no installed CLI.
+- Seeded the working `master_plan/Progress.md` with a real first snapshot (Phases 1–2 done, Phase 3 pending; 16 done / 1 remaining / 94%) so the format is visible and the file isn't empty.
+
+### 3. Next Steps (For the next agent)
+- The prompt counts in the seeded `Progress.md` are a point-in-time snapshot; re-run "check progress" to refresh them — don't trust the numbers as they age.
+- No user-manual entry: this is an agent/dev convention with no operator-facing UI surface.

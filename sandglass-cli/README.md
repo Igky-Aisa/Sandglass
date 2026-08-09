@@ -89,6 +89,18 @@ Queue Complete!
 
 ## CLI Commands
 
+Run `sandglass commands` at any time for a live, auto-generated table of every
+command (top-level and nested) with its description — handy when this README
+drifts out of sync. `sandglass <command> --help` still gives full option help
+for any single command.
+
+### General
+
+| Command | Description |
+|---|---|
+| `sandglass commands` | List every command, grouped by top-level and subcommand |
+| `sandglass version` | Show the installed Sandglass version |
+
 ### Project scaffolding
 
 | Command | Description |

@@ -4,6 +4,22 @@ Prompts moved here after execution, most recent first.
 
 ---
 
+## [Sandglass work] add a rule in Claude.md that allows to check progress frome…
+
+**Executed:** 2026-08-09 — claude-opus-4-8 (via `sandglass execute`)
+
+```
+============================
+
+add a rule in Claude.md that allows to check progress frome the main idea in master_plan\MASTER_ARQ_SYSTEM_MAP.md
+, gives a an idea of how many prompt has been done and how many remaining in prompt_tools\future_prompts.md
+the progress has to be updated in master_plan\Progress.md
+
+and save all that in the folders and file that "sandglass new-claude-project" creates
+
+============================
+```
+
 ## log quota-interruption marker in prompt_history.md (rewind/keep-history/reset-waiting)
 
 **Executed:** 2026-07-23 — sonnet (via `interactive chat (future prompts)`)
