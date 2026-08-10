@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`sandglass sleeptime` — quiet hours for push notifications, on by default (22:00–06:00).** Sandglass is built to run unattended for hours, so a quota wait routinely spans the night; every ntfy notification is a phone buzzing at 3am about something you can't act on until morning. Inside the window every notification is dropped — *not* queued for later, since by morning the batch has moved on and a backlog of stale 3am alerts is worse than no alert at all. The run itself is untouched: it keeps waiting and resuming exactly as before. `sandglass sleeptime` shows the window (and whether it's active right now), `sandglass sleeptime 22 6` sets it (bare hours or `22:30`), `--off`/`--on` toggle it without losing the window. Enforced inside `notify.send()` rather than at each call site, so every notification obeys it by construction, including any added later.
+- **Quiet hours are stored globally, in `~/.sandglass/settings.json`** — the first setting that isn't per-directory. `queue_source` describes a *project*, so it belongs in the local `.sandglass/`; sleep hours describe the *person*, and are the same whichever directory a run was launched from. Making them per-project would guarantee that the one run that wakes you is the one in the directory you forgot to configure. `SANDGLASS_QUIET_HOURS` (`"22:00-06:00"`, or `"off"`) overrides the file, matching how the ntfy topic itself is configured, so a headless/CI run can opt out without a home directory to write to. New `sandglass/quiet_hours.py`.
+### Changed
+
+- **A quota hit now pushes an explicit "Token limits hit" notification, and does so on every path.** It's sent from the point of detection in `execute_queue` rather than from the auto-resume loop, so `sandglass execute --once` — which stops on a quota hit and never reaches that loop — now notifies too, where before it went silent. The message names the expected refresh time in **local wall-clock time** (`03:15`) instead of a UTC ISO timestamp, since it's read off a phone at a glance. The auto-resume loop's old "waiting for quota to refresh" push was removed rather than retitled: it fired a second after this one for the same event, and two pushes per quota hit is just noise.
+
 ## [0.9.0] - 2026-08-09
 
 ### Added

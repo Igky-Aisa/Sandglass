@@ -33,8 +33,8 @@ Pro/Max subscription, usage counts against its refreshing quota — not a separa
 - A failed or interrupted run leaves the remaining prompts safely queued for a later `sandglass execute`
 - If run inside a project using a `master_plan/work_log.md` convention, backfills a lightweight session-log
   entry for any completed prompt that didn't already write its own — see "Work log backfill" below
-- Optional ntfy.sh push notifications (quota wait started/resumed, batch complete/stopped early) — see
-  "Push notifications" below
+- Optional ntfy.sh push notifications (token limits hit, resumed, batch complete/stopped early), with
+  quiet hours so an overnight run doesn't wake you — see "Push notifications" below
 
 **`sandglass execute` auto-resumes through quota hits.** There's still no scheduler or
 background daemon — you run it once and it keeps running in that terminal — but a quota
@@ -99,6 +99,7 @@ for any single command.
 | Command | Description |
 |---|---|
 | `sandglass commands` | List every command, grouped by top-level and subcommand |
+| `sandglass sleeptime [START] [END]` | Show or set the hours when notifications are held (default 22:00–06:00) |
 | `sandglass version` | Show the installed Sandglass version |
 
 ### Project scaffolding
@@ -266,9 +267,10 @@ sandglass execute --once       # old behavior: stop at the first failure
 ### Push notifications (ntfy.sh)
 
 If you're not watching the terminal, set an [ntfy.sh](https://ntfy.sh) topic and
-`sandglass execute` (in auto-resume mode) will push a notification at each of these
-points: a quota hit starts a wait, the wait ends and it resumes, the whole queue
-finishes, or the batch stops early for a non-quota reason.
+`sandglass execute` will push a notification at each of these points: **token limits
+hit** (with the expected refresh time), the wait ends and it resumes, the whole queue
+finishes, or the batch stops early for a non-quota reason. The token-limit one fires
+under `--once` too, even though that mode never waits.
 
 ```bash
 export SANDGLASS_NTFY_TOPIC=your-topic-name     # pick something private/hard to guess
@@ -282,6 +284,30 @@ parser, gitignored by convention). If `SANDGLASS_NTFY_TOPIC` isn't set, notifica
 silently skipped — nothing fails or slows down because of it.
 
 Ctrl-C at any point stops the wait cleanly — the queue stays exactly as it was.
+
+#### Sleep time (quiet hours)
+
+An unattended run routinely waits out a quota limit overnight, so notifications are
+**held between 22:00 and 06:00 by default** — no 3am buzz about something you can't
+act on until morning. The run itself is unaffected: it keeps waiting and resuming
+either way, and you just won't hear about it until the window ends.
+
+```bash
+sandglass sleeptime            # show the window, and whether it's active right now
+sandglass sleeptime 22 6       # set it (bare hours, or 22:30 / 06:15)
+sandglass sleeptime 23 7 --off # save a window but leave it disabled
+sandglass sleeptime --off      # notify at any hour
+sandglass sleeptime --on       # re-enable the saved window
+```
+
+Notifications inside the window are **dropped, not queued** — by morning the batch has
+moved on, and a backlog of stale 3am alerts is worse than none. This includes the
+"stopped early" alert, so a failure at 1am is only visible when you next look.
+
+Unlike `queue import`, this is stored **globally** in `~/.sandglass/settings.json`, not
+per-directory: you sleep the same hours whichever project you launched a run from.
+`SANDGLASS_QUIET_HOURS=22:00-06:00` (or `=off`) overrides the saved value for one run or
+one machine, which is the easiest way to opt a CI/headless environment out entirely.
 
 ## Security: unattended tool access
 

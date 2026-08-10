@@ -219,6 +219,21 @@ def _epoch_to_iso(epoch_seconds: int | float | None) -> str | None:
         return None
 
 
+def _local_time_str(iso_str: str | None) -> str:
+    """Render a UTC ISO timestamp as a local wall-clock time for humans.
+
+    Notification text only -- a reset time is read off a phone at a glance,
+    where "03:15" answers "how long am I waiting" and a UTC ISO string doesn't.
+    """
+    epoch = _iso_to_epoch(iso_str)
+    if epoch is None:
+        return "an unknown time"
+    try:
+        return datetime.fromtimestamp(epoch).strftime("%H:%M")
+    except (OverflowError, OSError, ValueError):
+        return "an unknown time"
+
+
 def _iso_to_epoch(iso_str: str | None) -> float | None:
     if not iso_str:
         return None
@@ -283,6 +298,16 @@ class ExecutionEngine:
                 )
                 if prompt.origin_file:
                     self._note_interruption(prompt, resume_at)
+                # Fired here, at the point of detection, rather than in
+                # run_with_auto_resume -- a quota hit under `--once` is exactly
+                # as worth knowing about, and that path never reaches the
+                # auto-resume loop at all.
+                still_queued = total - i
+                when = f" Expected to refresh around {_local_time_str(resume_at)}." if resume_at else ""
+                notify.send(
+                    f"Token limits hit.{when} {still_queued} prompt(s) still queued.",
+                    title="Sandglass: token limits hit",
+                )
                 break
             except Exception as exc:  # noqa: BLE001 — surface any API/network error gracefully
                 failed += 1
@@ -392,13 +417,10 @@ class ExecutionEngine:
                 )
                 return last_result
 
+            # No notification here: execute_queue already sent "token limits
+            # hit" the moment the quota was detected, a second ago. Two pushes
+            # for one event is just noise on the phone.
             wait_seconds = self._compute_wait_seconds(last_result.resume_at, poll_interval)
-            when = f" (around {last_result.resume_at})" if last_result.resume_at else ""
-            notify.send(
-                f"Quota limit reached -- waiting ~{wait_seconds / 60:.0f} min for it to "
-                f"refresh{when}. {len(remaining)} prompt(s) still queued.",
-                title="Sandglass: waiting for quota to refresh",
-            )
             try:
                 await self._sleep_with_animation(wait_seconds, last_result.resume_at)
             except asyncio.CancelledError:

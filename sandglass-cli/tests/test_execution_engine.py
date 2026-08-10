@@ -136,11 +136,32 @@ def test_run_with_auto_resume_sends_notifications_for_wait_resume_and_complete(q
 
     asyncio.run(engine.run_with_auto_resume(poll_interval=0.05))
 
+    # "token limits hit" comes from execute_queue's detection point, not from
+    # the auto-resume loop -- which is why it also fires under `--once`.
     assert sent == [
-        "Sandglass: waiting for quota to refresh",
+        "Sandglass: token limits hit",
         "Sandglass: resuming",
         "Sandglass: batch complete",
     ]
+
+
+def test_quota_hit_notifies_even_without_auto_resume(qm, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "sandglass.execution_engine.notify.send",
+        lambda message, title="Sandglass", priority="default": sent.append((title, message)),
+    )
+    qm.add_prompt("first")
+    qm.add_prompt("second")
+    engine = ExecutionEngine(qm, _AlwaysQuotaClient())
+
+    asyncio.run(engine.execute_queue())
+
+    assert len(sent) == 1
+    title, message = sent[0]
+    assert title == "Sandglass: token limits hit"
+    # The prompt that hit the limit is still queued, so both are counted.
+    assert "2 prompt(s) still queued" in message
 
 
 def test_run_with_auto_resume_sends_notification_when_stopped_early(qm, monkeypatch):

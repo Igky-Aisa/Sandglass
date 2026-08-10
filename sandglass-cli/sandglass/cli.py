@@ -14,6 +14,7 @@ from rich.table import Table
 from . import __version__  # noqa: E402 — UTF-8 stdout reconfig happens on package import
 from .claude_client import DEFAULT_PERMISSION_MODE, ClaudeClient
 from .execution_engine import DEFAULT_POLL_INTERVAL_SECONDS, ExecutionEngine
+from . import quiet_hours
 from .project_scaffold import new_claude_project, update_claude_md_template
 from .prompt_source import DEFAULT_QUEUE_SOURCE
 from .queue_manager import QueueManager
@@ -74,6 +75,75 @@ def commands() -> None:
 
     console.print(table)
     console.print("[dim]Run `sandglass <command> --help` for options on any command.[/dim]")
+
+
+@app.command()
+def sleeptime(
+    start: Optional[str] = typer.Argument(None, help="Start of quiet hours, e.g. 22 or 22:30."),
+    end: Optional[str] = typer.Argument(None, help="End of quiet hours, e.g. 6 or 06:30."),
+    off: bool = typer.Option(False, "--off", help="Disable quiet hours (notify at any hour)."),
+    on: bool = typer.Option(False, "--on", help="Re-enable quiet hours with the saved window."),
+) -> None:
+    """Set the hours when push notifications are held back (default 22:00-06:00).
+
+    Sandglass runs unattended for hours, so a quota wait routinely spans the
+    night. Within this window every ntfy notification is dropped instead of
+    buzzing your phone -- the run itself keeps waiting and resuming normally.
+
+    Run with no arguments to show the current window.
+    """
+    if off and on:
+        console.print("[red]Error: pass either --off or --on, not both.[/red]")
+        raise typer.Exit(code=1)
+
+    current = quiet_hours.load()
+
+    if start is None and end is None and not off and not on:
+        state = "on" if current.enabled else "off"
+        console.print(f"Sleep time: {current.start_text} → {current.end_text} ([bold]{state}[/bold])")
+        if current.enabled:
+            if quiet_hours.is_quiet():
+                console.print("[dim]Active right now — notifications are being held.[/dim]")
+            else:
+                console.print("[dim]Not active right now — notifications will go through.[/dim]")
+        console.print(f"[dim]Stored in {quiet_hours.global_settings_path()} (applies to every project).[/dim]")
+        if os.environ.get(quiet_hours.QUIET_HOURS_ENV):
+            console.print(
+                f"[yellow]Note: {quiet_hours.QUIET_HOURS_ENV} is set and overrides the saved value.[/yellow]"
+            )
+        return
+
+    if start is None and (off or on):
+        # Toggling only -- keep whatever window is already saved.
+        saved = quiet_hours.save(current.start, current.end, enabled=on)
+        console.print(
+            f"[green]✓ Sleep time {'enabled' if on else 'disabled'}"
+            f" ({saved.start_text} → {saved.end_text})[/green]"
+        )
+        return
+
+    if start is None or end is None:
+        console.print("[red]Error: give both a start and an end, e.g. `sandglass sleeptime 22 6`.[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        start_minutes = quiet_hours.parse_time(start)
+        end_minutes = quiet_hours.parse_time(end)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    if start_minutes == end_minutes:
+        console.print("[red]Error: start and end are the same — that window is empty.[/red]")
+        raise typer.Exit(code=1)
+
+    saved = quiet_hours.save(start_minutes, end_minutes, enabled=not off)
+    console.print(f"[green]✓ Sleep time set to {saved.start_text} → {saved.end_text}[/green]")
+    console.print("[dim]Notifications are held during this window on every project.[/dim]")
+    if os.environ.get(quiet_hours.QUIET_HOURS_ENV):
+        console.print(
+            f"[yellow]Note: {quiet_hours.QUIET_HOURS_ENV} is set and overrides what you just saved.[/yellow]"
+        )
 
 
 # --- project scaffolding ----------------------------------------------------

@@ -497,3 +497,25 @@ Docs: `README.md` (Features bullets, new "Push notifications" section, Auto-resu
 ### 3. Next Steps (For the next agent)
 - Version lives in **two** places (`setup.py`, `sandglass/__init__.py`) with nothing keeping them in sync — they happened to agree here, but a future bump that touches only one will produce a *real* drift that looks exactly like this session's fake one. If it bites once, make `setup.py` read `__version__` from the package instead of hardcoding it.
 - A `git pull` never needs a reinstall for code changes (editable install points at the working tree), but it **does** if `entry_points` or `install_requires` change in `setup.py`, and the pip metadata goes stale on any version bump. Cheap rule: re-run `pip install -e .` after pulling a change to `setup.py`.
+
+## 2026-08-09 - Opus 5 - Token-limit notification + sleep-time quiet hours
+
+### 1. Context Snapshot
+- **Goal**: Push an explicit "token limits hit" ntfy on a quota hit, and add a command to silence notifications overnight (default 22:00–06:00) so an unattended run can't wake the user.
+- **State**: `sandglass-cli/` — new `quiet_hours.py`, touched `notify.py`, `execution_engine.py`, `cli.py`.
+- **Previous Blocker**: None.
+
+### 2. Work Done
+- **New `sandglass/quiet_hours.py`.** Window as minutes-since-local-midnight in a frozen `QuietHours` dataclass; `contains()` handles the wrap past midnight explicitly (22:00→06:00 is two ranges, not one — the bug this would otherwise have shipped with). Parsing accepts bare hours because that is how the window is spoken about ("22 to 6").
+- **Stored globally in `~/.sandglass/settings.json`, deliberately breaking the per-directory pattern.** `queue_source` describes a project so it belongs in the local `.sandglass/`; sleep hours describe the *person* and are identical whichever directory a run was launched from. Per-project would guarantee that the one run that wakes you is the one in the directory you forgot to configure. `SANDGLASS_QUIET_HOURS` overrides the file, matching how the ntfy topic itself is configured, so CI/headless can opt out without a writable home dir.
+- **Enforced inside `notify.send()`, not at call sites.** One choke point means all five existing notifications obey it by construction and so will any added later. Suppressed pushes are *dropped, not queued*: by morning the batch has moved on, and a backlog of stale 3am alerts is worse than silence. `is_quiet()` fails open (notify rather than crash) — consistent with this module's standing rule that a notification never breaks a run.
+- **"Token limits hit" fires from the detection point in `execute_queue`**, not from `run_with_auto_resume`. That is what makes it reach `--once`, which stops on quota and never enters the auto-resume loop — it was silent before. Removed the loop's old "waiting for quota to refresh" push rather than retitling it: it fired ~1s later for the same event, and two pushes per hit is noise. New `_local_time_str()` renders the reset time as local wall-clock, since the message is read off a phone where `03:15` answers the question and a UTC ISO string doesn't.
+- **Tests**: new `tests/test_quiet_hours.py` (20 tests — parsing, midnight wrap, persistence round-trip, corrupt config, env override, fail-open) + a suppression test in `test_notify.py` and a `--once` notification test in `test_execution_engine.py`. `test_notify.py`'s autouse fixture now forces quiet hours off, or the suite would pass or fail according to what time of day it ran at. 124/124 pass.
+- Docs: `CHANGELOG.md`, `sandglass-cli/README.md` (Features, CLI table, new "Sleep time" subsection), `master_plan/user_manual.md` §9 + §13.
+
+### 3. Next Steps (For the next agent)
+- **Quiet hours silence bad news too** — "batch stopped early" is held like everything else. That is intentional (you can't act on it at 3am) and documented as a gotcha, but it is the design decision most likely to be revisited; a `priority="high"` bypass is the obvious lever if the user ever asks.
+- `notify.py`'s docstring used to claim "no persisted settings". That is no longer true and the docstring was corrected — don't restore the old wording.
+- Sleep hours read the machine's local clock. No timezone handling: a laptop that travels reports the local time wherever it is, which is the intended behaviour, not an oversight.
+- **Landmine, hit during this session: run pytest from `sandglass-cli/`, never from the repo root.** `WORK_LOG_PATH` is the relative path `master_plan/work_log.md`, resolved against the CWD, and the tests don't chdir to a tmp dir — so a full-suite run launched from the repo root makes the work-log backfill append ~8 fake "sandglass execute (claude-opus-4-8)" entries to *this file*, and they get committed if nobody looks. They were stripped by hand here. The real fix is an autouse `monkeypatch.chdir(tmp_path)` fixture in `tests/`, or making the path injectable on `ExecutionEngine` — not yet done.
+

@@ -420,6 +420,10 @@ Sandglass is built so a bad run never loses your queue:
 | `sandglass history` | Show everything ever completed |
 | `sandglass responses list` | List saved response files |
 | `sandglass responses show INDEX` | Read one saved response in full |
+| `sandglass sleeptime` | Show the hours when notifications are silenced (see §13) |
+| `sandglass sleeptime START END` | Set them, e.g. `sandglass sleeptime 22 6` (default 22:00–06:00) |
+| `sandglass sleeptime --off` / `--on` | Silence nothing / restore the saved window |
+| `sandglass commands` | List every command with a one-line description |
 | `sandglass version` | Print the installed version |
 | `sandglass new-claude-project [PATH]` | Scaffold `CLAUDE.md` + `master_plan/` + `prompt_tools/` into a new project (see §14) |
 | `sandglass claude-md-update [SOURCE]` | Adopt `SOURCE` as the template `new-claude-project` will use next (see §14) |
@@ -475,8 +479,10 @@ fallback entry itself, so the log stays complete either way.
 
 **Can I get a phone/desktop notification instead of watching the terminal?**
 Yes — see §13. Set `SANDGLASS_NTFY_TOPIC` (env var or `.env` file) and
-`sandglass execute` pushes via ntfy.sh at each quota wait/resume and at the
-end of the batch. Unset by default; nothing is sent until you configure it.
+`sandglass execute` pushes via ntfy.sh when token limits are hit, when it
+resumes, and at the end of the batch. Unset by default; nothing is sent until
+you configure it. Note that pushes are silenced overnight by default
+(22:00–06:00) — `sandglass sleeptime` changes or disables that.
 
 ---
 
@@ -528,11 +534,12 @@ wrote by hand.
 
 ## 13. Push notifications (ntfy.sh)
 
-If you're not watching the terminal during a long run, `sandglass execute` (in its
-default auto-resume mode) can push a notification via [ntfy.sh](https://ntfy.sh) at
-four points:
+If you're not watching the terminal during a long run, `sandglass execute` can push a
+notification via [ntfy.sh](https://ntfy.sh) at four points:
 
-- A quota hit starts a wait ("waiting for quota to refresh")
+- **You've hit your token limits** ("token limits hit") — including the time the limit is
+  expected to refresh, shown in your own local time. This one arrives even with `--once`,
+  which stops instead of waiting.
 - The wait ends and the queue resumes ("resuming")
 - The whole queue finishes ("batch complete")
 - The batch stops early for a non-quota reason, or gives up after too many stalls
@@ -563,6 +570,45 @@ Then subscribe to that same topic in the [ntfy Android/iOS app](https://ntfy.sh)
 notification call is a silent no-op. A failed or unreachable ntfy server is handled the
 same way (logged as a warning, never raised) — a notification is a nice-to-have, not
 something that should ever break or stall a queue run.
+
+### Sleep time — silencing notifications overnight
+
+A run left going overnight will very often hit a token limit at 2am and resume at 5am.
+Without this, that's two phone buzzes while you're asleep, about something you can't do
+anything with until morning.
+
+So notifications are **held between 22:00 and 06:00 by default.** You don't have to turn
+this on — it's already on the first time you run Sandglass.
+
+```bash
+sandglass sleeptime              # show the window, and whether it's active right now
+sandglass sleeptime 22 6         # set it: from 22:00 to 06:00
+sandglass sleeptime 23:30 7      # half-hours work too
+sandglass sleeptime --off        # notify at any hour
+sandglass sleeptime --on         # turn it back on, same window as before
+```
+
+Times are your computer's own local clock, on a 24-hour scale — `22` is 10pm, `6` is 6am.
+A window that runs past midnight (the normal case) is expected and handled.
+
+**Gotchas — read this part:**
+
+- **The run itself is completely unaffected.** Sandglass keeps waiting out the limit and
+  resuming through the night exactly as it always did. The only thing that changes is
+  whether your phone tells you about it.
+- **Silenced notifications are gone, not delayed.** You will *not* get a pile of them at
+  06:00. By then the batch has moved on and those alerts describe a situation that no
+  longer exists — a stack of stale 3am messages is more confusing than none. Check the
+  terminal, or `sandglass history`, to see what happened while you slept.
+- **This includes bad news.** "Batch stopped early" is silenced too. If a run breaks at
+  1am, you find out when you look, not when it happens. If you're running something you
+  genuinely need to be woken for, `sandglass sleeptime --off` first.
+- **It applies to every project, not just the one you set it in.** Unlike the queue
+  source, this is one setting for you as a person, saved in your user folder
+  (`~/.sandglass/settings.json`). Set it once, anywhere.
+- If nothing is being silenced when you expect it to be, check whether a
+  `SANDGLASS_QUIET_HOURS` variable is set in your environment or `.env` — it overrides
+  what you saved, and `sandglass sleeptime` will say so when it's in play.
 
 ---
 

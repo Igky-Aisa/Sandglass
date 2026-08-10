@@ -9,9 +9,14 @@ from sandglass import notify
 def _clean_ntfy_env(monkeypatch):
     """Every test starts unconfigured -- avoids leaking a real topic from the
     developer's own shell environment into a test run that shouldn't send
-    anything over the network."""
+    anything over the network.
+
+    Quiet hours are forced off too: they are on by default, so without this
+    every send() test would fail or pass purely according to what time of day
+    the suite happens to run at."""
     monkeypatch.delenv(notify.NTFY_TOPIC_ENV, raising=False)
     monkeypatch.delenv(notify.NTFY_SERVER_ENV, raising=False)
+    monkeypatch.setattr("sandglass.notify.quiet_hours.is_quiet", lambda: False)
 
 
 def test_is_configured_false_without_a_topic():
@@ -90,6 +95,18 @@ def test_send_respects_a_custom_server(monkeypatch):
     notify.send("hello")
 
     assert captured["url"] == "https://ntfy.example.com/my-topic"
+
+
+def test_send_is_suppressed_during_quiet_hours(monkeypatch):
+    monkeypatch.setenv(notify.NTFY_TOPIC_ENV, "my-topic")
+    monkeypatch.setattr("sandglass.notify.quiet_hours.is_quiet", lambda: True)
+    calls = []
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: calls.append(1))
+
+    sent = notify.send("wake up", title="Sandglass: token limits hit", priority="high")
+
+    assert sent is False
+    assert calls == []  # dropped before any network call, at any priority
 
 
 def test_send_returns_false_and_does_not_raise_on_network_error(monkeypatch):

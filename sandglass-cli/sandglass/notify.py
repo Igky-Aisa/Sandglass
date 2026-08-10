@@ -1,11 +1,15 @@
 """Optional ntfy.sh push notifications for long-running `sandglass execute` waits.
 
-Configured entirely via environment variables -- no CLI flags, no persisted
-settings -- so a queue run started in an unattended/headless context (the
+Whether to notify at all is configured entirely via environment variables --
+no CLI flags -- so a queue run started in an unattended/headless context (the
 whole reason this tool exists) doesn't need any extra setup beyond what's
 already in the shell environment. If unconfigured, every call here is a
 silent no-op: a missing notification is never a reason to fail or slow down
 a queue run.
+
+*When* it is acceptable to notify is the one exception, and it is a persisted
+setting rather than an env var: see `quiet_hours`, which holds notifications
+overnight so an unattended multi-hour run can't wake you at 3am.
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ import logging
 import os
 import urllib.error
 import urllib.request
+
+from . import quiet_hours
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +48,23 @@ def is_configured() -> bool:
 
 def send(message: str, title: str = "Sandglass", priority: str = "default") -> bool:
     """Best-effort push notification. Returns True if actually sent, False if
-    skipped (no topic configured) or failed (network/server error).
+    skipped (no topic configured, or quiet hours) or failed (network/server
+    error).
 
     Never raises -- a notification is a nice-to-have, not something that
     should ever break or stall a queue run over a flaky network.
+
+    Quiet hours are enforced here rather than at each call site so every
+    notification obeys them by construction, including any added later.
     """
     url = _ntfy_url()
     if url is None:
+        return False
+    if quiet_hours.is_quiet():
+        # Dropped, not queued for later: by morning the batch has moved on and
+        # a backlog of stale 3am alerts is worse than no alert at all. The run
+        # itself is unaffected -- it keeps waiting and resuming either way.
+        logger.info("Quiet hours in effect -- suppressed notification: %s", title)
         return False
     try:
         request = urllib.request.Request(
