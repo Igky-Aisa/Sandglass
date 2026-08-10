@@ -379,6 +379,18 @@ def execute(
             "the same permission rules an interactive session would use."
         ),
     ),
+    require_artifact: bool = typer.Option(
+        True,
+        "--require-artifact/--no-require-artifact",
+        help=(
+            "Refuse to cut a markdown block out of its source file when the prompt "
+            "changed no file in the git working tree, and stop the run. Protects "
+            "against archiving a block whose response was a refusal — the cut "
+            "destroys the only copy of the block text. Skipped automatically "
+            "outside a git repo. Pass --no-require-artifact for queues of "
+            "read-only prompts (reviews, questions) that legitimately write nothing."
+        ),
+    ),
 ) -> None:
     """Execute all queued prompts sequentially via the Claude Code CLI.
 
@@ -443,7 +455,13 @@ def execute(
             "get tool access without asking. Only run prompts you trust.[/yellow]"
         )
 
-    engine = ExecutionEngine(qm, client)
+    if not require_artifact:
+        console.print(
+            "[yellow]⚠ --no-require-artifact: a block will be cut from its source file "
+            "even if the prompt changes nothing on disk.[/yellow]"
+        )
+
+    engine = ExecutionEngine(qm, client, require_artifact=require_artifact)
     try:
         if once:
             asyncio.run(engine.execute_queue())

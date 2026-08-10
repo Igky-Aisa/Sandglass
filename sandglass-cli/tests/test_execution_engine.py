@@ -559,3 +559,182 @@ def test_execute_queue_never_creates_a_master_plan_dir_when_absent(qm, tmp_path,
     asyncio.run(engine.execute_queue())
 
     assert not (tmp_path / "master_plan").exists()
+
+
+# --- the artifact gate (sandglass/workspace.py) -------------------------------
+#
+# Regression tests for a real incident: twelve blocks in the Asymmetry project were
+# cut from future_prompts.md into prompt_history.md having landed zero code, two of
+# them (P4.03, P5.01) with responses that were verbatim refusals to proceed. The cut
+# destroys the only copy of the block text, so those phases became undeliverable.
+
+
+class _RefusingClient:
+    """A run that reads the repo, concludes it cannot proceed, and says so.
+
+    Writes nothing. This is the exact shape of `.sandglass/responses/response_041.json`
+    and `response_042.json` from the incident -- a *successful* API call whose content
+    is a refusal.
+    """
+
+    model = "claude-opus-4-8"
+
+    def estimate_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+    async def send_prompt(self, text, on_chunk=None, model=None):
+        if on_chunk is not None:
+            on_chunk("blocked")
+        return Response(
+            prompt_id="",
+            text="P5.01 can't be built right now - its dependency was never built.",
+            tokens_used=5000,
+            model=self.model,
+        )
+
+
+class _WritingClient:
+    """A run that actually produces a work product."""
+
+    model = "claude-opus-4-8"
+
+    def __init__(self, target: str):
+        self.target = target
+
+    def estimate_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+    async def send_prompt(self, text, on_chunk=None, model=None):
+        with open(self.target, "a", encoding="utf-8") as fh:
+            fh.write("real work landed here\n")
+        if on_chunk is not None:
+            on_chunk("ok")
+        return Response(prompt_id="", text="done", tokens_used=10, model=self.model)
+
+
+def _git_repo(tmp_path):
+    """Init a real git repo with one commit; returns True if git is usable."""
+    import subprocess
+
+    def run(*args):
+        return subprocess.run(
+            args, cwd=str(tmp_path), capture_output=True, text=True, check=False
+        )
+
+    if run("git", "init").returncode != 0:
+        return False
+    run("git", "config", "user.email", "t@example.com")
+    run("git", "config", "user.name", "t")
+    (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
+    run("git", "add", "-A")
+    run("git", "commit", "-m", "seed")
+    return run("git", "rev-parse", "HEAD").returncode == 0
+
+
+def _markdown_queue(tmp_path, qm, blocks=2):
+    source = tmp_path / "future_prompts.md"
+    source.write_text(
+        "\n====\n".join(f"block {i} body" for i in range(1, blocks + 1)),
+        encoding="utf-8",
+    )
+    qm.import_from_markdown(str(source))
+    return source
+
+
+def test_refusal_that_writes_nothing_is_not_cut_from_the_source(qm, tmp_path, monkeypatch):
+    """THE regression test: a response with no work product must not be archived."""
+    if not _git_repo(tmp_path):
+        pytest.skip("git unavailable")
+    monkeypatch.chdir(tmp_path)
+    source = _markdown_queue(tmp_path, qm, blocks=2)
+    before = source.read_text(encoding="utf-8")
+
+    engine = ExecutionEngine(qm, _RefusingClient())
+    result = asyncio.run(engine.execute_queue())
+
+    assert result.stopped_reason == "no_artifact"
+    assert result.completed == 0
+    # The block is still in the source file -- the whole point.
+    assert source.read_text(encoding="utf-8") == before
+    # And still in the queue, so nothing is lost.
+    assert len(qm.get_all_prompts()) == 2
+    # No history file was created for a block that never ran.
+    assert not (tmp_path / "prompt_history.md").exists()
+
+
+def test_refusal_stops_the_run_instead_of_cascading(qm, tmp_path, monkeypatch):
+    """A refusal usually means a missing dependency; later blocks depend on it.
+
+    In the real incident P4.03 refused, then P5.01 refused, then P5.03 refused --
+    three blocks consumed because the run kept going.
+    """
+    if not _git_repo(tmp_path):
+        pytest.skip("git unavailable")
+    monkeypatch.chdir(tmp_path)
+    _markdown_queue(tmp_path, qm, blocks=3)
+
+    engine = ExecutionEngine(qm, _RefusingClient())
+    result = asyncio.run(engine.execute_queue())
+
+    assert result.stopped_reason == "no_artifact"
+    assert len(qm.get_all_prompts()) == 3, "must stop at the first, not burn the rest"
+
+
+def test_a_prompt_that_writes_a_file_is_still_cut_normally(qm, tmp_path, monkeypatch):
+    """The gate must not block real work -- the obvious way to break this fix."""
+    if not _git_repo(tmp_path):
+        pytest.skip("git unavailable")
+    monkeypatch.chdir(tmp_path)
+    source = _markdown_queue(tmp_path, qm, blocks=2)
+
+    engine = ExecutionEngine(qm, _WritingClient(str(tmp_path / "out.txt")))
+    result = asyncio.run(engine.execute_queue())
+
+    assert result.stopped_reason is None
+    assert result.completed == 2
+    assert qm.get_all_prompts() == []
+    assert source.read_text(encoding="utf-8").strip() == ""
+    assert (tmp_path / "prompt_history.md").exists()
+
+
+def test_no_require_artifact_restores_the_old_permissive_behaviour(qm, tmp_path, monkeypatch):
+    if not _git_repo(tmp_path):
+        pytest.skip("git unavailable")
+    monkeypatch.chdir(tmp_path)
+    source = _markdown_queue(tmp_path, qm, blocks=1)
+
+    engine = ExecutionEngine(qm, _RefusingClient(), require_artifact=False)
+    result = asyncio.run(engine.execute_queue())
+
+    assert result.stopped_reason is None
+    assert result.completed == 1
+    assert source.read_text(encoding="utf-8").strip() == ""
+
+
+def test_gate_is_skipped_outside_a_git_repo_so_non_git_projects_still_work(
+    qm, tmp_path, monkeypatch
+):
+    """Fails open when it cannot measure -- a non-git project must keep working."""
+    monkeypatch.chdir(tmp_path)  # deliberately NOT a git repo
+    source = _markdown_queue(tmp_path, qm, blocks=1)
+
+    engine = ExecutionEngine(qm, _RefusingClient())
+    result = asyncio.run(engine.execute_queue())
+
+    assert result.stopped_reason is None
+    assert result.completed == 1
+    assert source.read_text(encoding="utf-8").strip() == ""
+
+
+def test_manually_added_prompts_are_never_gated(qm, tmp_path, monkeypatch):
+    """`queue add` prompts have no block to protect, so the gate must not apply."""
+    if not _git_repo(tmp_path):
+        pytest.skip("git unavailable")
+    monkeypatch.chdir(tmp_path)
+    qm.add_prompt("just answer a question, write nothing")
+
+    engine = ExecutionEngine(qm, _RefusingClient())
+    result = asyncio.run(engine.execute_queue())
+
+    assert result.stopped_reason is None
+    assert result.completed == 1

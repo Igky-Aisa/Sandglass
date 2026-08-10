@@ -170,6 +170,31 @@ into its sibling `prompt_history.md` (labeled `[Sandglass work]`) — newest fir
 manual workflow's own convention exactly. A block that fails (or is still running when the process stops) stays
 in `future_prompts.md` untouched, so nothing is lost.
 
+**"Completes successfully" means it changed something.** The cut is a lock: it removes the
+only copy of the block text from the queue so no other runner runs it twice. That is only
+sound if the block actually produced what it asked for — and a run that reads the repo,
+concludes it *cannot* proceed (a dependency was never built), and says so returns exactly
+like a run that wrote a thousand lines. So before cutting, Sandglass fingerprints the git
+working tree and compares it to a fingerprint taken before the prompt ran. If **nothing
+changed**, it refuses the cut, leaves the block where it is, and stops the run:
+
+```
+  ✖ No work product: the response changed no file in the working tree.
+  Not cutting this block from prompt_tools/future_prompts.md. The response is
+  saved in .sandglass/responses/response_042.json — read it before re-running.
+  Stopping: a block that refuses usually means a dependency is missing, and the
+  blocks after it depend on this one.
+```
+
+It stops rather than skipping ahead because a refusal is almost always a missing
+dependency, and the blocks queued behind it depend on the one that just refused —
+continuing simply burns them the same way.
+
+Sandglass's own `.sandglass/` writes never count as a work product, and the check is
+skipped entirely outside a git repo (and for prompts added with `queue add`, which have no
+block to protect). For a queue of genuinely read-only prompts — reviews, questions,
+summaries that write nothing — pass `--no-require-artifact`.
+
 To point at a different file instead — e.g. to keep a separate queue for a different
 project or purpose — set it once:
 

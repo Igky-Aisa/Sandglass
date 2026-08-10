@@ -19,7 +19,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from . import notify, prompt_source
+from . import notify, prompt_source, workspace
 from .claude_client import ClaudeClient, QuotaExceededError
 from .models import ExecutionResult, PromptObject, Response
 from .queue_manager import QueueManager
@@ -251,10 +251,16 @@ class ExecutionEngine:
         queue_manager: QueueManager,
         claude_client: ClaudeClient,
         storage: StorageService | None = None,
+        require_artifact: bool = True,
     ):
         self.queue_manager = queue_manager
         self.claude_client = claude_client
         self.storage = storage or queue_manager.storage
+        # Refuse to cut a markdown block out of its source file when the prompt
+        # changed nothing on disk. See sandglass/workspace.py for why this exists
+        # and what it cost to learn. Only meaningful for markdown-sourced prompts;
+        # `queue add` prompts have no source file to protect.
+        self.require_artifact = require_artifact
 
     # --- Public API -------------------------------------------------------
 
@@ -282,6 +288,18 @@ class ExecutionEngine:
         for i, prompt in enumerate(prompts):
             console.print(f"[bold][{i + 1}/{total}][/bold] {prompt.title}")
             work_log_before = self._work_log_snapshot()
+            # Only measured for markdown-sourced prompts: the cut is the only
+            # irreversible step, and `queue add` prompts have no block to cut.
+            # Anchored at the directory holding the markdown queue source, not the
+            # process CWD: that is the repo whose blocks are at stake, and it keeps
+            # the measurement correct even when sandglass is invoked from elsewhere.
+            workspace_before = (
+                workspace.workspace_fingerprint(
+                    cwd=os.path.dirname(os.path.abspath(prompt.origin_file)) or None
+                )
+                if (self.require_artifact and prompt.origin_file)
+                else None
+            )
             try:
                 response = await self.execute_prompt(prompt)
             except QuotaExceededError as exc:
@@ -319,6 +337,47 @@ class ExecutionEngine:
                     "for a later `sandglass execute`.[/yellow]"
                 )
                 break
+
+            # --- the artifact gate ---------------------------------------------
+            # A response that changed nothing on disk is not a completed block.
+            # Cutting it would destroy the only copy of the block text (see
+            # sandglass/workspace.py), so stop instead: leave the prompt at the
+            # front of the queue AND its block in the markdown, exactly like the
+            # quota path does, and let a human decide what happened.
+            if workspace_before is not None:
+                workspace_after = workspace.workspace_fingerprint(
+                    cwd=os.path.dirname(os.path.abspath(prompt.origin_file)) or None
+                )
+                if not workspace.produced_work_product(workspace_before, workspace_after):
+                    failed += 1
+                    stopped_reason = "no_artifact"
+                    logger.error(
+                        "Prompt %s returned a response but changed nothing on disk; "
+                        "refusing to cut it from %s",
+                        prompt.id, prompt.origin_file,
+                    )
+                    console.print(
+                        "  [red]✖ No work product: the response changed no file "
+                        "in the working tree.[/red]"
+                    )
+                    console.print(
+                        f"  [yellow]Not cutting this block from {prompt.origin_file}. "
+                        f"The response is saved in "
+                        f"{os.path.join('.sandglass', 'responses', f'response_{prompt.id}.json')} "
+                        f"— read it before re-running.[/yellow]"
+                    )
+                    console.print(
+                        "  [yellow]Stopping: a block that refuses usually means a "
+                        "dependency is missing, and the blocks after it depend on "
+                        "this one.[/yellow]"
+                    )
+                    still_queued = total - i
+                    notify.send(
+                        f"'{prompt.title}' returned a response but changed no files. "
+                        f"Not cut. {still_queued} prompt(s) still queued.",
+                        title="Sandglass: no work product",
+                    )
+                    break
 
             results.append(response)
             total_tokens += response.tokens_used
@@ -391,12 +450,24 @@ class ExecutionEngine:
                 return last_result
             if last_result.stopped_reason != "quota":
                 # Non-quota failure -- don't auto-retry, the user needs to look at it.
-                notify.send(
-                    f"Stopped after a non-quota error. {last_result.completed} prompt(s) "
-                    f"executed, {len(remaining)} still queued for a later run.",
-                    title="Sandglass: batch stopped early",
-                    priority="high",
-                )
+                # "no_artifact" gets its own wording: it is not an error in the usual
+                # sense (nothing crashed), and describing it as one sends the reader
+                # hunting for a stack trace instead of reading the response.
+                if last_result.stopped_reason == "no_artifact":
+                    notify.send(
+                        f"Stopped: a prompt returned a response but changed no files, so "
+                        f"its block was NOT cut. {last_result.completed} prompt(s) executed, "
+                        f"{len(remaining)} still queued. Read the saved response.",
+                        title="Sandglass: no work product",
+                        priority="high",
+                    )
+                else:
+                    notify.send(
+                        f"Stopped after a non-quota error. {last_result.completed} prompt(s) "
+                        f"executed, {len(remaining)} still queued for a later run.",
+                        title="Sandglass: batch stopped early",
+                        priority="high",
+                    )
                 return last_result
 
             made_progress = last_result.completed > 0 or remaining[0].id != prompts_before[0].id
