@@ -111,3 +111,19 @@
 - **Measure a real chained batch.** Everything above is validated by unit tests and a scratch-repo dry run, not by a live multi-block run. Watch the cache read/write split in the summary: chaining should push it heavily toward *read*. If it doesn't, the prefix is still being invalidated somewhere and `--stable-prefix` isn't covering it.
 - **Watch for context exhaustion on long queues.** A 20-block chain is one long conversation; Claude Code auto-compacts, but nobody has run a queue that long warm yet. If output quality degrades late in a batch, that's the first suspect — `--session-mode prompt` is the fallback.
 - `sandglass queue lint` only checks backticked paths. Dependency-ordering checks between blocks are the obvious next addition.
+
+## 2026-08-11 - Opus 5 - Chained queues died on block 2: prompt parsed as a CLI flag
+
+### 1. Context Snapshot
+- **Goal**: Explain and fix a live Azymetrix run that completed block 1 of 34 and failed block 2 in 1.4s with `error: unknown option '---…'`.
+- **State**: `sandglass-cli/sandglass/claude_client.py` (command construction only).
+- **Previous Blocker**: Resolved. Same batch's earlier "session already in use" wedge was the prior fix; this is a different fault it uncovered.
+
+### 2. Work Done
+- **`-p/--print` takes no value.** `claude [options] [prompt]` — the prompt is positional. Sandglass built `["-p", text]`, which happened to work only because prompts had never started with a dash. Chaining introduced one: `CHAIN_TURN_SEPARATOR` opens with a `---` markdown rule, so every block after the first was handed to the option parser as a flag. Block 1 (no separator) always passed; block 2 always died. Verified against the real CLI, not inferred — `claude --print=<text>` also fails, confirming it is not an option at all.
+- **Fixed at the parser boundary, not the separator.** Moved the text to the end behind `--`. Renaming the separator would have hidden the bug and left every block opening with a `- ` bullet still broken.
+- Prompt 046 stayed queued and the chain session survived, so the batch resumes with `sandglass execute` — no state repair needed.
+
+### 3. Next Steps (For the next agent)
+- The Azymetrix run is still the first real chained batch; the "measure a real chained batch" note in the entry above is unanswered. Block 1 billed 8.8M tokens / $7.40 with 98% cache reuse over 15.8 min — the reuse is right, the absolute size is not yet explained. Check whether one block really needs ~150 model turns or whether the artifact gate is provoking rework.
+- That account is at 75% of its seven-day quota (`allowed_warning` on the rate-limit event). A 33-block queue at block 1's cost will not fit; consider `--budget-usd` before the next `sandglass execute`.

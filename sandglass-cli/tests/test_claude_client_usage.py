@@ -168,3 +168,34 @@ def test_sandglass_never_names_a_session_itself(monkeypatch):
     assert "--session-id" not in seen[0]
     assert "--no-session-persistence" not in seen[0]
     assert response.session_id == "cli-assigned"
+
+
+def test_a_prompt_that_starts_with_a_dash_is_not_read_as_a_flag(monkeypatch):
+    """`-p` is a boolean flag and the prompt is positional, so a block opening
+    with `---`, `-` or `--` was parsed as an option: the live failure was
+    `unknown option '---\\nThe previous task is finished...'`, which killed the
+    batch on the second block of every chained run. Passing the text behind
+    `--` ends option parsing and makes any prompt shape safe."""
+    import json
+
+    client = ClaudeClient()
+    client._cli_path = "claude"
+    seen: list[list[str]] = []
+    prompt = "---\nThe previous task is finished.\n- do the next thing"
+
+    async def fake_exec(*cmd, **kwargs):
+        seen.append(list(cmd))
+        result = {
+            "type": "result", "is_error": False, "result": "ok",
+            "session_id": "s", "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+        return _FakeProc([json.dumps(result) + "\n"], "", 0)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    asyncio.run(client.send_prompt(prompt))
+
+    cmd = seen[0]
+    assert cmd[-2:] == ["--", prompt], "prompt must be the last arg, behind `--`"
+    # The old shape. `-p` takes no value, so the text was landing in argv as a
+    # bare positional with nothing protecting its leading dashes.
+    assert cmd[cmd.index("-p") + 1] != prompt

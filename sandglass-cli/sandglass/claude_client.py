@@ -200,7 +200,7 @@ class ClaudeClient:
 
         cmd = [
             self._cli_path,
-            "-p", text,
+            "-p",
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
@@ -217,6 +217,14 @@ class ClaudeClient:
             cmd += ["--effort", effective_effort]
         if self.budget_usd is not None:
             cmd += ["--max-budget-usd", str(self.budget_usd)]
+
+        # The prompt is a POSITIONAL argument, not the value of `-p` (`-p` is a
+        # boolean flag: `claude [options] [prompt]`). It therefore has to come
+        # last, behind `--`, or the CLI's option parser reads any prompt that
+        # opens with a dash as a flag and dies with "unknown option". That is
+        # not a rare shape: a markdown bullet, a `---` rule, or an em-dash list
+        # all start a perfectly ordinary block this way.
+        cmd += ["--", text]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
