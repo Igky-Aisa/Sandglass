@@ -29,6 +29,18 @@ def qm(tmp_path):
     return QueueManager(storage=StorageService(base_path=str(tmp_path / ".sandglass")))
 
 
+def _task_of(text: str) -> str:
+    """The task line out of what the client was handed.
+
+    The engine may prepend a bounded project-state brief to a prompt before
+    sending it, so the text a client receives is not always the prompt text.
+    A real model answers about the task, not by quoting its whole input, and
+    these doubles have to do the same or they'd assert on the brief.
+    """
+    lines = [line for line in text.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else text
+
+
 class _FlakyThenOkClient:
     """Fails a specific prompt with a quota error a fixed number of times, then succeeds.
 
@@ -40,6 +52,7 @@ class _FlakyThenOkClient:
     """
 
     model = "claude-opus-4-8"
+    effort = None
 
     def __init__(self, fail_text: str, times: int, resets_in: float = -RESET_BUFFER_SECONDS - 60):
         self.fail_text = fail_text
@@ -50,7 +63,7 @@ class _FlakyThenOkClient:
     def estimate_tokens(self, text: str) -> int:
         return len(text) // 4
 
-    async def send_prompt(self, text, on_chunk=None, model=None):
+    async def send_prompt(self, text, on_chunk=None, model=None, **kwargs):
         if text == self.fail_text and self.attempts < self.times:
             self.attempts += 1
             raise QuotaExceededError(
@@ -59,18 +72,21 @@ class _FlakyThenOkClient:
             )
         if on_chunk is not None:
             on_chunk("ok")
-        return Response(prompt_id="", text=f"done: {text}", tokens_used=10, model=self.model)
+        return Response(
+            prompt_id="", text=f"done: {_task_of(text)}", tokens_used=10, model=self.model
+        )
 
 
 class _AlwaysQuotaClient:
     """Always raises a quota error -- simulates a misclassified permanent failure."""
 
     model = "claude-opus-4-8"
+    effort = None
 
     def estimate_tokens(self, text: str) -> int:
         return len(text) // 4
 
-    async def send_prompt(self, text, on_chunk=None, model=None):
+    async def send_prompt(self, text, on_chunk=None, model=None, **kwargs):
         raise QuotaExceededError(
             "permanently stuck",
             rate_limit_info={"status": "rejected", "resetsAt": time.time() - RESET_BUFFER_SECONDS - 60},
@@ -81,11 +97,12 @@ class _AlwaysErrorClient:
     """Always raises a plain, non-quota error."""
 
     model = "claude-opus-4-8"
+    effort = None
 
     def estimate_tokens(self, text: str) -> int:
         return len(text) // 4
 
-    async def send_prompt(self, text, on_chunk=None, model=None):
+    async def send_prompt(self, text, on_chunk=None, model=None, **kwargs):
         raise RuntimeError("network is down")
 
 
@@ -99,11 +116,12 @@ class _SelfLoggingClient:
     """
 
     model = "claude-opus-4-8"
+    effort = None
 
     def estimate_tokens(self, text: str) -> int:
         return len(text) // 4
 
-    async def send_prompt(self, text, on_chunk=None, model=None):
+    async def send_prompt(self, text, on_chunk=None, model=None, **kwargs):
         with open(WORK_LOG_PATH, "a", encoding="utf-8") as fh:
             fh.write("\n## a real entry the headless run wrote for itself\n")
         if on_chunk is not None:
@@ -578,11 +596,12 @@ class _RefusingClient:
     """
 
     model = "claude-opus-4-8"
+    effort = None
 
     def estimate_tokens(self, text: str) -> int:
         return len(text) // 4
 
-    async def send_prompt(self, text, on_chunk=None, model=None):
+    async def send_prompt(self, text, on_chunk=None, model=None, **kwargs):
         if on_chunk is not None:
             on_chunk("blocked")
         return Response(
@@ -597,6 +616,7 @@ class _WritingClient:
     """A run that actually produces a work product."""
 
     model = "claude-opus-4-8"
+    effort = None
 
     def __init__(self, target: str):
         self.target = target
@@ -604,7 +624,7 @@ class _WritingClient:
     def estimate_tokens(self, text: str) -> int:
         return len(text) // 4
 
-    async def send_prompt(self, text, on_chunk=None, model=None):
+    async def send_prompt(self, text, on_chunk=None, model=None, **kwargs):
         with open(self.target, "a", encoding="utf-8") as fh:
             fh.write("real work landed here\n")
         if on_chunk is not None:

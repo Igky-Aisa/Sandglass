@@ -50,6 +50,38 @@ You need two things installed before Sandglass is useful:
    pip install -e .
    ```
 
+   On a machine where you just want to *use* it rather than work on it, pipx
+   keeps it isolated and puts `sandglass` on your PATH:
+
+   ```bash
+   pipx install "git+https://github.com/Igky-Aisa/Sandglass.git#subdirectory=sandglass-cli"
+   ```
+
+> ⚠️ **Never `pip install sandglass` on its own.** That name belongs to a
+> different, unrelated project on PyPI — you'd install someone else's package
+> instead of this one. Always give the full git URL, or install from a clone.
+
+### Keeping it up to date
+
+```bash
+sandglass update --check    # show what would change, change nothing
+sandglass update            # do it
+```
+
+It figures out how Sandglass got onto the machine and does the right thing.
+If you installed from a **clone**, it runs `git pull` — the code is live
+straight away, nothing gets reinstalled. If you installed a **copy** (the pipx
+one-liner above), it reinstalls from GitHub.
+
+**Gotcha:** if you have your own uncommitted edits in the Sandglass source, it
+will refuse and tell you to commit or stash first. That's deliberate — pulling
+over half-finished work is how people lose an afternoon. `--force` skips the
+check but still never throws anything away.
+
+**Gotcha:** `sandglass version` only changes on a release, so it's a poor way
+to tell whether you have a particular fix. Check for the command instead:
+`sandglass commands | grep rotate-logs`.
+
 Then make sure `claude` is logged into your subscription:
 
 ```bash
@@ -126,8 +158,25 @@ sandglass queue stats
 sandglass execute --dry-run
 ```
 
-This lists every prompt that *would* run, with a rough token estimate, and
-sends nothing. Use this to sanity-check a queue before walking away from it.
+This lists every prompt that *would* run, with a rough token estimate and the
+model and effort each will use, and sends nothing. Use it to sanity-check a
+queue before walking away from it.
+
+Worth pairing with:
+
+```bash
+sandglass queue lint
+```
+
+This looks for problems that would waste a whole run: a block referring to a
+file that doesn't exist yet, an empty block, a misspelled effort level. It
+costs nothing — no model is called — and it leaves the queue exactly as it
+found it.
+
+**Read the warnings, don't obey them blindly.** A "references X, which does not
+exist" warning is often fine: the block might be the thing that *creates* X. It
+matters when the block expects something an *earlier* block was supposed to
+have built — that's the case where the run burns quota and produces nothing.
 
 ### Step 3 — Run it
 
@@ -213,6 +262,44 @@ back to the CLI's default. `sandglass queue list` and
 `sandglass execute --dry-run` both show which model each queued prompt
 will use, so you can double-check a mixed-model queue before running it.
 
+### Effort — how hard the model should think
+
+Alongside the model, each prompt can set an **effort** level: `low`,
+`medium`, `high`, `xhigh` or `max`. Lower effort means the model makes fewer
+and more consolidated tool calls, writes less preamble, and finishes sooner.
+It's the cheapest dial you have that doesn't change which model runs.
+
+```bash
+sandglass queue add "Rename the button label" --effort low
+```
+
+```
+model: sonnet
+effort: low
+
+Write integration tests for the auth module.
+```
+
+`sandglass execute --effort medium` sets a default for prompts that don't
+name their own.
+
+**Rule of thumb:** most blocks are not `max`. Mechanical edits are `low`,
+ordinary feature work is `medium`, genuinely hard design work is `high` or
+above. If a prompt comes back shallow, raise the effort rather than adding
+"think carefully" to the text.
+
+### TIER markers
+
+If your queue file already labels blocks with a marker like
+`**TIER: SONNET**` or `**TIER: CHEAP — EXTERNAL-OK**`, Sandglass now reads
+those and picks a matching model and effort — `SONNET` → sonnet/medium,
+`CHEAP` → haiku/low, `OPUS` → opus/high. Previously the marker was just text
+and every block ran on the default model no matter what it said.
+
+**Gotcha:** the marker only counts near the top of a block, and an explicit
+`model:`/`effort:` header always beats it. If you'd rather Sandglass ignored
+markers entirely, run `sandglass execute --no-tiers`.
+
 ---
 
 ## 5. Using future_prompts.md as your default queue
@@ -275,7 +362,54 @@ anything right away. The next time the queue is empty and you run
 
 ---
 
-## 6. Auto-resume: what happens when you hit your usage limit
+## 6. Warm sessions and auto-resume
+
+### Your queue doesn't start from scratch at every prompt
+
+Prompts run **one after another, unattended** — that's the whole point of the
+tool and it hasn't changed. What changed is that they now run inside **one
+warm conversation** instead of a brand-new one each time.
+
+It matters more than it sounds. A fresh Claude session re-reads your
+`CLAUDE.md`, re-loads the tool descriptions, and re-opens whatever files the
+last prompt already looked at — before it does a single useful thing. On a
+real project that's tens of thousands of tokens per prompt, paid over and
+over. Chained, your queue pays it once.
+
+You'll see it in the run output: the first prompt says
+`Sending to Claude (opus)...` and every one after says
+`Sending to Claude (opus, warm session)...`.
+
+**The trade-off, stated plainly:** prompt 6 can see what prompt 5 did. That is
+exactly why it's cheaper — but it also means prompt 5's mistakes are visible
+to prompt 6. Sandglass tells each new prompt, in one line, that the previous
+task is finished and this is a separate job, which handles the ordinary case.
+
+**When you want a prompt kept clean**, put `isolate: true` at the top of the
+block:
+
+```
+isolate: true
+
+Review the auth changes as if you'd never seen them before.
+```
+
+That prompt runs on its own with no prior context, and the chain picks back up
+on the next one. Good for a second opinion, or a review that shouldn't see the
+reasoning of whoever wrote the code.
+
+**When you want the whole batch kept clean:**
+
+```bash
+sandglass execute --session-mode prompt    # every prompt separate, retries still resume
+sandglass execute --session-mode isolate   # every prompt fully cold (the old behaviour)
+```
+
+The warm session ends by itself when the queue empties, when you run
+`sandglass queue clear`, or after 24 hours — so tomorrow's unrelated batch
+never gets bolted onto today's conversation.
+
+### What happens when you hit your usage limit
 
 This is the part that makes the tool worth using instead of just typing the
 prompt into chat yourself. By default, `sandglass execute`:
@@ -285,7 +419,11 @@ prompt into chat yourself. By default, `sandglass execute`:
    `prompt_history.md` — the block itself is *not* cut out (only a
    successful completion does that), so the eventual retry picks it up
    exactly where it was, and the gap between "started" and "actually
-   finished" is visible in the log rather than silent.
+   finished" is visible in the log rather than silent. The retry also
+   **rejoins the same warm session**, so it continues from where the
+   interrupted prompt got to instead of working the whole thing out again
+   from nothing — even if the wait spanned hours and a restart of your
+   machine.
 2. If a prompt fails because your subscription's usage window is exhausted,
    it doesn't give up — it reads the **exact time Claude Code says the quota
    refreshes**, adds a 2-minute safety buffer (retrying right at the exact
@@ -406,7 +544,9 @@ Sandglass is built so a bad run never loses your queue:
 | `sandglass queue add TEXT` | Queue a prompt from raw text |
 | `sandglass queue add --file FILE` | Queue a prompt from a file |
 | `sandglass queue add TEXT --model MODEL` | Queue a prompt pinned to a specific model (see §4) |
-| `sandglass queue list` | Show everything currently queued (including per-prompt model) |
+| `sandglass queue add TEXT --effort LEVEL` | Queue a prompt at a specific thinking depth (see §4) |
+| `sandglass queue list` | Show everything currently queued (including per-prompt model and effort) |
+| `sandglass queue lint` | Check queued blocks for problems before spending anything (see §3) |
 | `sandglass queue remove INDEX` | Remove one prompt (1-based index) |
 | `sandglass queue clear [--yes]` | Empty the whole queue |
 | `sandglass queue stats` | Queue size + rough token estimate |
@@ -417,7 +557,14 @@ Sandglass is built so a bad run never loses your queue:
 | `sandglass execute --dry-run` | Preview a run without sending anything |
 | `sandglass execute --poll-interval SECONDS` | Fallback retry cadence when no exact reset time is known (default 900 = 15 min) |
 | `sandglass execute --permission-mode MODE` | Loosen/tighten unattended tool access (see §7) |
-| `sandglass history` | Show everything ever completed |
+| `sandglass execute --effort LEVEL` | Default thinking depth for prompts that don't set their own (see §4) |
+| `sandglass execute --budget-usd N` | Stop any single prompt once it has cost N dollars |
+| `sandglass execute --no-brief` | Don't inject the project-state brief; let each block read the full work log (see §12) |
+| `sandglass execute --session-mode MODE` | `chain` (default), `prompt`, or `isolate` — how much context blocks share (see §6) |
+| `sandglass execute --no-tiers` | Ignore `TIER:` markers in block text (see §4) |
+| `sandglass rotate-logs [--keep N]` | Archive old work-log / prompt-history entries (see §12) |
+| `sandglass update [--check]` | Update Sandglass itself from its git repo (see §2) |
+| `sandglass history` | Show everything ever completed, with tokens and cost |
 | `sandglass responses list` | List saved response files |
 | `sandglass responses show INDEX` | Read one saved response in full |
 | `sandglass sleeptime` | Show the hours when notifications are silenced (see §13) |
@@ -529,6 +676,44 @@ runs in.
 A fallback entry is clearly labeled as such (`Auto-logged by sandglass execute...`) so
 it's never mistaken for a real narrative report someone (or some other headless run)
 wrote by hand.
+
+### The work log is also the most expensive file in the project
+
+Every block in a queue runs as its own fresh Claude session. If your CLAUDE.md
+tells agents to read `work_log.md` before starting, that read happens **once
+per block** — against a file that only ever grows. On a mature project it can
+easily be the largest single cost of a run, and it buys almost nothing: what
+matters is the last session or two.
+
+Sandglass handles this two ways, and both are on by default:
+
+**A project-state brief is prepended to each prompt.** Before sending a block,
+Sandglass builds a short `<project_state>` block from the last two work-log
+entries plus `Progress.md`, and tells the run not to open those files in full.
+It only does this if `master_plan/` exists, and it's capped in size so it can't
+quietly grow into the thing it replaced.
+
+*When to turn it off:* `sandglass execute --no-brief`, if a batch genuinely
+needs deep history — an archaeology task, or a block that has to reconcile
+something from months ago.
+
+**`sandglass rotate-logs` archives the old entries.**
+
+```bash
+sandglass rotate-logs            # keeps the last 5 entries
+sandglass rotate-logs --keep 10
+```
+
+Older entries move to `master_plan/archive/work_log_archive_<date>.md` and a
+pointer line is left at the top of the live file. It does the same for
+`prompt_tools/prompt_history.md`. **Nothing is deleted** — it's a move, so the
+history is still there, one file over, and still in git.
+
+*Gotcha:* commit the archive file along with the trimmed one. If you commit only
+the shortened `work_log.md`, the history looks deleted in the diff.
+
+*When to run it:* once the log passes roughly ten entries. There's no harm in
+running it more often; below the threshold it does nothing and says so.
 
 ---
 

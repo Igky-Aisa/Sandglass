@@ -12,10 +12,29 @@ This is a regulation-safe domain platform (Flutter). Philosophy: **Determinism, 
 
 1. `master_plan/SYSTEM_MAP.md` — **agent quick-reference**: current-state map of commands/handlers/routes/services/models/pages, deploy topology, and gotchas (read before grepping the tree). Keep it updated when connections change.
 2. `master_plan/ECSP MASTER ARCHITECTURE V4.txt` — authoritative architecture
-3. `master_plan/work_log.md` — current state, last session, known blockers
+3. `master_plan/work_log.md` — **the last two entries only** (see the reading budget below)
 4. `master_plan/rules_for_every_promt.md` — long-form protocol, rationale, examples
 
 (The essentials from those files are inlined below so they apply every prompt; read the source files for detail/rationale.)
+
+### Reading budget — read the tail, not the file
+
+`work_log.md` and `prompt_tools/prompt_history.md` are **append-only**: they
+only ever grow, and they are already far larger than the architecture doc. A
+full read of the work log costs more than most tasks do, and it buys almost
+nothing — the part that matters is the last session or two.
+
+- **Default to the last two entries** of `work_log.md`, not the whole file.
+  Read further back only when you're chasing something specific, and say what.
+- **`prompt_history.md` is a record, not a working document.** Don't read it to
+  find out what's going on; that's what `work_log.md` and `Progress.md` are for.
+- **If a `<project_state>` block appears at the top of your prompt, that IS the
+  state** — `sandglass execute` put it there precisely so you don't re-read
+  these files. Trust it and get to work; open the full files only if you need
+  history it genuinely doesn't cover.
+- Run **`sandglass rotate-logs`** when the work log passes ~10 entries. It moves
+  the older ones to `master_plan/archive/` and leaves a pointer, so history
+  stays available without being re-read on every task.
 
 ## Non-negotiables
 
@@ -74,6 +93,28 @@ Append at the end of every task:
 ```
 Focus on **why** a decision was made relative to the Architecture, not the obvious.
 
+### Keep entries short — every future task pays for this one
+
+This file is read by every agent that comes after you, and it never shrinks.
+An entry that's twice as long is a cost charged to every future session, so
+length here is not free the way it is in a chat reply.
+
+**Target ~20 lines. Hard ceiling 40.** To stay there:
+
+- **Never paste code, diffs, file contents, or command output.** Name the file
+  and the function — `sandglass/claude_client.py:_response_from_usage` — and
+  let the next agent open it. The code is in git; the log is for what git
+  can't tell them.
+- **Write what wasn't obvious**: the decision and its reason, the thing that
+  looked right and wasn't, the constraint that forced an ugly shape. Skip
+  anything a `git log` or a glance at the diff already says.
+- **One bullet per real decision**, not per file touched.
+- **"Next Steps" is the highest-value section** — it's the part the next agent
+  actually acts on. Be specific enough to resume from: a file and a question,
+  not "continue the work".
+- If a task genuinely needs a long write-up, put it in its own document under
+  `master_plan/` and link to it in one line from here.
+
 ## API SPEC comment rule
 
 Whenever you create a Button, GestureDetector, or any Widget that triggers a backend interaction, add this block immediately above the `onPressed`/`onTap` handler:
@@ -110,6 +151,58 @@ surface. But if a fix **changes visible behaviour** (a new default, a moved or
 renamed control, a rule the operator must now follow), that IS user-facing —
 update the entry rather than staying silent.
 
+## How to write a block in `future_prompts.md`
+
+Blocks run one after another, unattended, sharing **one warm session** — so a
+block can see what earlier blocks did, but it is still a separate task and is
+told so explicitly. Write each block as if the reader knows the project but not
+your intentions: state the job, don't assume it will infer it from the block
+before.
+
+**Optional front matter**, first lines of the block, followed by a blank line:
+
+```
+model: sonnet
+effort: low
+
+Add the dirty-flag badge to the strategy editor...
+```
+
+- `model:` — `opus` / `sonnet` / `haiku`, or a full model ID.
+- `effort:` — `low` / `medium` / `high` / `xhigh` / `max`. Lower means fewer,
+  more-consolidated tool calls and less preamble. Most blocks are not `max`.
+- `isolate: true` — run this block with no memory of the earlier ones. Blocks
+  normally share one warm session (that's what stops each one re-reading the
+  whole project), so use this only when prior context would actively harm the
+  work: an independent review, a genuine second opinion.
+- A `**TIER: SONNET**`-style marker near the top works too and maps to a
+  sensible model+effort pair, but explicit front matter is clearer and wins.
+
+**Then write the block itself:**
+
+- **One block, one deliverable.** If it needs "and then also", it's two blocks.
+- **Name every file you expect it to touch, in backticks** — `lib/foo/bar.dart`.
+  This is what makes the work findable without a repo-wide grep, and
+  `sandglass queue lint` uses it to warn you before a run that a path the block
+  depends on doesn't exist yet.
+- **State the acceptance check.** "Done when `flutter analyze` is clean and the
+  badge appears on an edited strategy." A block with no definition of done
+  tends to produce either half a feature or three times as much as you wanted.
+- **Declare dependencies explicitly**: "assumes block 7 created the
+  `StrategyRepository`." A block whose dependency was never built burns a full
+  run and delivers nothing, and saying so out loud also survives the block
+  being run on its own later.
+- **Don't restate project context.** Architecture, conventions, and the current
+  state already reach the run via `CLAUDE.md` and the injected
+  `<project_state>` brief. Repeating them costs tokens on every block and adds
+  nothing.
+- **Prefer "change X to do Y" over "investigate X".** Open-ended exploration is
+  the most expensive shape a block can have and the least likely to end in a
+  diff.
+
+Before queueing a batch, run **`sandglass queue lint`** — it's free and catches
+missing paths, empty blocks, and bad effort values before they cost a run.
+
 ## "future prompts" trigger
 
 When I say **"future prompts"**: prompts are separated by lines containing `====` at start and end.
@@ -121,7 +214,7 @@ When I say **"future prompts"**: prompts are separated by lines containing `====
 When I say **"future prompts all"**
 1. execute all the prompts one by one in the `future_prompts.md` file, following the instructions above.
 
-**Per-prompt model:** if the top prompt's block starts with a `model: <name>` line followed by a blank line (e.g. `model: Opus`), that names the model it should run under.if you can switch your own model do it , just remind at the end of the response in the chat the model switch,and if you can't switch your own model — tell me to run `/model <name>` first if it doesn't match what I'm currently on. wait for 10 second for the switch and if it doesn't happend just keep using the model available for you Strip the header before treating the rest as the prompt body.
+**Per-prompt model:** if the top prompt's block starts with a `model: <name>` line followed by a blank line (e.g. `model: Opus`), that names the model it should run under. An `effort:` line may follow it; when I run the block myself in chat there's no equivalent switch, so just note it and match the depth it asks for.if you can switch your own model do it , just remind at the end of the response in the chat the model switch,and if you can't switch your own model — tell me to run `/model <name>` first if it doesn't match what I'm currently on. wait for 10 second for the switch and if it doesn't happend just keep using the model available for you Strip the header before treating the rest as the prompt body.
 
 **Relationship to `sandglass execute`:** the Sandglass CLI (`sandglass-cli/`) can also read `future_prompts.md` directly — if its queue is empty, `sandglass execute` auto-loads every `====` block from this same file and runs each one headlessly via `claude -p`, cutting completed ones into `history_prompts.md` the same way. These are two different execution paths over the same file, not duplicates of each other: saying "future prompts" to me means *I* run the top block myself, interactively, in this chat; running `sandglass execute` means it runs unattended through the CLI instead. Whichever processes a block first cuts it out, so a block is never run twice — but be intentional about which one you're asking for.
 
@@ -142,7 +235,10 @@ stands against its own plan, then record it. Do all three:
    percentage — e.g. `16 done / 1 remaining (17 total, 94%)`. These are the two
    ends of one pipeline: a block leaves `future_prompts.md` and lands in
    `prompt_history.md` when it completes (see the "future prompts" trigger).
-3. **Write it down.** Update
+3. **Check the reading budget.** If `work_log.md` holds more than ~10 entries,
+   run `sandglass rotate-logs` — every future task is paying to read whatever
+   is in there. Mention it in the report either way.
+4. **Write it down.** Update
    [master_plan/Progress.md](<master_plan/Progress.md>) with the result —
    overwrite the live snapshot at the top (date + who), don't just pile on
    noise. Keep it short: the master-plan standing, the prompt counts, and any

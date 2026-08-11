@@ -116,7 +116,9 @@ for any single command.
 | `sandglass queue add TEXT` | Add a prompt from raw text |
 | `sandglass queue add --file FILE` | Add a prompt from a file |
 | `sandglass queue add TEXT --model MODEL` | Add a prompt pinned to a specific model (e.g. `opus`, `sonnet`, `haiku`, or a full model ID) |
-| `sandglass queue list` | List all queued prompts (including per-prompt model) |
+| `sandglass queue add TEXT --effort LEVEL` | Add a prompt at a specific reasoning depth (`low`…`max`) |
+| `sandglass queue list` | List all queued prompts (including per-prompt model and effort) |
+| `sandglass queue lint` | Free static pre-flight: missing referenced paths, empty blocks, bad effort values |
 | `sandglass queue remove INDEX` | Remove a prompt (1-based index) |
 | `sandglass queue clear [--yes]` | Clear the entire queue |
 | `sandglass queue stats` | Show queue size and estimated token usage |
@@ -132,12 +134,19 @@ for any single command.
 | `sandglass execute --dry-run` | Preview what would run without calling Claude |
 | `sandglass execute --poll-interval SECONDS` | Fallback wait between retries when no exact reset time is reported (default: 900 = 15 min) |
 | `sandglass execute --permission-mode MODE` | Passed through to `claude -p` (default: `bypassPermissions`) — see Security below |
+| `sandglass execute --no-brief` | Don't prepend the project-state brief; let each block read the full work log itself |
+| `sandglass execute --session-mode MODE` | `chain` (default, one warm session for the queue), `prompt` (one per block), `isolate` (all cold) |
+| `sandglass execute --effort LEVEL` | Default reasoning depth for prompts that don't set their own |
+| `sandglass execute --budget-usd N` | Hard per-prompt spend cap (`claude --max-budget-usd`) |
+| `sandglass execute --no-tiers` | Ignore `TIER:` markers in block text |
+| `sandglass rotate-logs [--keep N]` | Archive old `work_log.md` / `prompt_history.md` entries into `master_plan/archive/` |
+| `sandglass update [--check]` | Update Sandglass itself from the git repo (see Updating below) |
 
 ### History & responses
 
 | Command | Description |
 |---|---|
-| `sandglass history` | Show completed prompts (archive) |
+| `sandglass history` | Show completed prompts with billed tokens, cached tokens and cost |
 | `sandglass responses list` | List saved response files |
 | `sandglass responses show INDEX` | View a specific saved response |
 
@@ -226,29 +235,151 @@ complete either way.
 This only ever activates if `master_plan/` already exists — Sandglass won't invent this
 convention in a project that doesn't use it.
 
-## Per-prompt model
+## Per-prompt model and effort
 
-Every prompt in the queue can use a different model. Two ways to set one:
+Every prompt in the queue can use a different model and reasoning depth.
+Three ways to set them, in order of precedence:
 
 ```bash
 # 1. Explicitly, at add time
-sandglass queue add "Refactor the auth module" --model opus
-
-# 2. A `model: <name>` header on the prompt itself (text or --file), followed
-#    by a blank line — handy when adding prompts from files:
+sandglass queue add "Refactor the auth module" --model opus --effort high
 ```
 
 ```
+# 2. Front matter on the prompt itself (text or --file), followed by a
+#    blank line — handy when adding prompts from files:
 model: sonnet
+effort: low
 
 Write integration tests for the auth module.
 ```
 
-`--model` always wins if both are given. Accepts short aliases (`opus`,
-`sonnet`, `haiku` — same as `claude --model`) or a full model ID (e.g.
-`claude-opus-4-8`). Prompts with no model set use the CLI's default
-(`claude-opus-4-8`). `queue list` and `execute --dry-run` both show which
-model each prompt will use.
+```
+# 3. A TIER marker near the top of the block, which many queue files already
+#    carry as a note to the human reader:
+**TIER: CHEAP — EXTERNAL-OK** — add a dirty-flag badge to the editor
+```
+
+Models accept short aliases (`opus`, `sonnet`, `haiku` — same as
+`claude --model`) or a full model ID. Effort is `low` | `medium` | `high` |
+`xhigh` | `max`; lower means fewer, more-consolidated tool calls and less
+preamble, which is the cheapest dial available that doesn't change the model.
+Tier markers map to a model+effort pair (`SONNET` → `sonnet`/`medium`,
+`CHEAP` → `haiku`/`low`); `--no-tiers` ignores them. Prompts with nothing set
+use the CLI defaults. `queue list` and `execute --dry-run` both show what each
+prompt will actually run as.
+
+## Installing and updating on another machine
+
+Sandglass is **not on PyPI**. The name `sandglass` there belongs to an
+unrelated project, so `pip install sandglass` installs something else
+entirely. Always install from the git URL:
+
+```bash
+# Recommended — isolated, and `sandglass` lands on your PATH
+pipx install "git+https://github.com/Igky-Aisa/Sandglass.git#subdirectory=sandglass-cli"
+
+# Or, if you want to hack on it: clone and install editable
+git clone https://github.com/Igky-Aisa/Sandglass.git
+pipx install -e ./Sandglass/sandglass-cli
+```
+
+Then, on any machine:
+
+```bash
+sandglass update --check    # what would change, without changing anything
+sandglass update            # do it
+```
+
+`update` works out how this machine got Sandglass and acts accordingly:
+
+| Install shape | What `update` does |
+|---|---|
+| Editable clone (`pipx install -e`, `pip install -e`) | `git pull --ff-only` in the source tree. The code is live immediately — nothing is reinstalled. |
+| Copy install (`pipx install git+…`, `pip install git+…`) | Reinstalls from the remote with `pipx` / `uv tool` / `pip`, whichever owns the install. |
+
+**It will not pull over uncommitted changes.** A clone is a working tree, and
+a pull across half-finished work is how an afternoon disappears — commit or
+stash first. `--force` skips that check but still never discards anything: the
+pull is `--ff-only` and git refuses on conflict.
+
+**Checking whether you have a given fix** — `sandglass version` is not
+reliable, since the version string only moves on a release. Use:
+
+```bash
+sandglass commands | grep rotate-logs   # present ⇒ you have this release
+```
+
+## Keeping a long queue affordable
+
+Sandglass exists to run a queue unattended, one block after another, and that
+hasn't changed. What changed is that the queue no longer starts from scratch at
+every block.
+
+Blocks used to run as **N cold `claude -p` sessions**. Each one re-paid every
+fixed cost from zero, and those costs are larger than they look:
+
+- **A do-nothing prompt is not free.** Measured in a project with a large
+  `CLAUDE.md`: `"Reply with exactly: OK"` billed **23,788 tokens** before the
+  model did anything, because the system prompt, tool schemas and project
+  memory are re-sent every time.
+- **A `read work_log.md` mandate is paid per block.** On a mature project the
+  work log and system map are ~100k tokens, re-read from cold for every block,
+  forever, and growing.
+- **Repeated runs re-*create* the prompt cache rather than reading it**, unless
+  the prefix is byte-identical — and git status lives in that prefix, so any
+  block that writes a file invalidates it for the next one.
+
+Sandglass now addresses all three by default, and you can switch each off:
+
+| Default | What it does | Off switch |
+|---|---|---|
+| `--session-mode chain` | Runs the whole queue as **one warm session**, so only the first block pays for the system prompt, `CLAUDE.md` and the files the queue has already read | `--session-mode isolate` |
+| `--brief` | Injects the last two work-log entries + `Progress.md` as a bounded `<project_state>` block and tells the run not to re-read those files | `--no-brief` |
+| `--stable-prefix` | Moves cwd/env/git-status out of the system prompt so the cached prefix survives between blocks | `--no-stable-prefix` |
+| `--tiers` | Honours `TIER:` markers so cheap blocks run on cheap models | `--no-tiers` |
+
+### What chaining does and doesn't change
+
+**Unchanged:** blocks still run strictly one after another, unattended;
+`execute` still auto-resumes through quota hits; each block is still cut from
+`future_prompts.md` into `prompt_history.md` as it completes; the artifact gate
+still stops a run that produced nothing.
+
+**Changed:** block 6 can see what block 5 did. That's the point — it's why
+block 6 doesn't have to re-read the same files — but it means a mistake in
+block 5 is visible to block 6 too. Three things keep that manageable:
+
+- Every warm block is prefixed with a short **turn separator** telling the
+  model the previous task is finished and this is a new, independent one.
+- **A single block can opt out** with `isolate: true` in its front matter. The
+  chain resumes on the block after it. Use it for a review that shouldn't see
+  the author's reasoning, or a genuine second opinion.
+- **The chain ends when the queue drains** (and on `queue clear`, and after 24
+  hours). An interrupted run rejoins its session; an unrelated batch tomorrow
+  gets a fresh one.
+
+If a queue really needs hermetic blocks, `--session-mode prompt` keeps retries
+resumable while giving each block its own session, and `--session-mode isolate`
+is the fully cold behaviour.
+
+Two things worth doing by hand:
+
+```bash
+sandglass rotate-logs        # archive old work_log entries once past ~10
+sandglass queue lint         # free; catches blocks that would refuse anyway
+```
+
+`sandglass execute` reports billed tokens, cost, and the **cache read/write
+split** at the end of a run. The split is the number to watch: reads are a
+fraction of base price and writes a multiple of it, so a run that is mostly
+writes is paying a premium for a prefix it never reuses.
+
+> **Note on historical numbers.** Before this accounting fix, Sandglass summed
+> `input_tokens + output_tokens` — which omits cache tokens entirely and so
+> undercounts a cached run badly (53 reported against 23,788 billed, in the
+> measurement above). `sandglass history` marks those older rows with `*` and
+> leaves them out of its totals rather than mixing two incompatible numbers.
 
 ## Auto-resume
 

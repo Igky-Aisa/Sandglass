@@ -172,3 +172,64 @@ def test_manually_added_prompts_have_no_origin_file(qm):
     qm.add_prompt(text="a normal prompt")
 
     assert qm.get_prompt(1).origin_file is None
+
+
+# --- front matter and tier markers ------------------------------------------
+
+
+def test_effort_header_is_parsed_alongside_model(qm):
+    qm.add_prompt(text="model: opus\neffort: low\n\nDo a small thing")
+
+    prompt = qm.get_prompt(1)
+    assert prompt.model == "opus"
+    assert prompt.effort == "low"
+    assert prompt.text == "Do a small thing"
+
+
+def test_tier_marker_supplies_model_and_effort_when_no_header(qm):
+    """The marker was already being written by prompt authors and ignored by
+    Sandglass, which ran every block on the default (Opus) regardless."""
+    qm.add_prompt(text="**TIER: SONNET** - add the CRUD screen and wire it up")
+
+    prompt = qm.get_prompt(1)
+    assert prompt.model == "sonnet"
+    assert prompt.effort == "medium"
+    # The marker is prose the author wrote for a human; it stays in the text.
+    assert "TIER: SONNET" in prompt.text
+
+
+def test_cheap_tier_maps_to_the_cheapest_model(qm):
+    qm.add_prompt(text="**TIER: CHEAP - EXTERNAL-OK** - a dirty-flag and a badge")
+
+    prompt = qm.get_prompt(1)
+    assert prompt.model == "haiku"
+    assert prompt.effort == "low"
+
+
+def test_explicit_header_beats_a_tier_marker(qm):
+    qm.add_prompt(text="model: opus\n\n**TIER: CHEAP** - actually this one is hard")
+
+    assert qm.get_prompt(1).model == "opus"
+
+
+def test_explicit_argument_beats_everything(qm):
+    qm.add_prompt(text="**TIER: CHEAP** - small thing", model="opus", effort="max")
+
+    prompt = qm.get_prompt(1)
+    assert prompt.model == "opus"
+    assert prompt.effort == "max"
+
+
+def test_tiers_can_be_switched_off(qm):
+    qm.add_prompt(text="**TIER: SONNET** - a task", use_tiers=False)
+
+    prompt = qm.get_prompt(1)
+    assert prompt.model is None
+    assert prompt.effort is None
+
+
+def test_a_tier_mentioned_deep_in_the_body_is_not_front_matter(qm):
+    body = "Do the thing.\n\n" + ("filler line\n" * 60) + "TIER: CHEAP was the old plan\n"
+    qm.add_prompt(text=body)
+
+    assert qm.get_prompt(1).model is None

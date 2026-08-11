@@ -35,6 +35,17 @@ class StorageService:
     def settings_path(self) -> str:
         return os.path.join(self.base_path, "settings.json")
 
+    @property
+    def run_state_path(self) -> str:
+        """Which Claude Code session the current queue drain is running in.
+
+        Kept on disk rather than in memory because the thing it has to survive
+        is exactly a process ending: a quota hit can stop `sandglass execute`
+        entirely, and the run that picks the queue back up hours later still
+        needs to rejoin the same conversation instead of starting over.
+        """
+        return os.path.join(self.base_path, "run_state.json")
+
     # --- Directory management --------------------------------------------
 
     def ensure_dir(self, path: str) -> None:

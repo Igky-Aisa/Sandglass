@@ -13,7 +13,43 @@ from .storage import StorageService
 logger = logging.getLogger(__name__)
 
 _TITLE_MAX = 60
-_MODEL_HEADER_RE = re.compile(r"^model\s*:\s*(\S.*)$", re.IGNORECASE)
+# Front-matter keys a prompt block may set for itself. Anything else on a
+# leading `key: value` line is treated as prose, not configuration -- a prompt
+# is free to start with "note: ..." without Sandglass reinterpreting it.
+_HEADER_KEYS = ("model", "effort", "isolate")
+# Values that make `isolate: <x>` mean "yes". Anything else is read as "no",
+# so a typo degrades to the cheaper default rather than silently opting a
+# block out of the chain.
+_TRUTHY = {"true", "yes", "1", "on"}
+_HEADER_RE = re.compile(
+    rf"^({'|'.join(_HEADER_KEYS)})\s*:\s*(\S.*)$", re.IGNORECASE
+)
+
+# Queue files in the wild already annotate blocks with a tier marker on the
+# first line -- `**TIER: SONNET**`, `**TIER: CHEAP - EXTERNAL-OK**` and so on --
+# written by the prompt author to say how much model this block deserves.
+# Sandglass used to ignore those entirely and run every block on the default
+# (Opus), which is both expensive and not what the author asked for. Reading
+# them is therefore a fix, not a new convention: the intent was already stated,
+# it just wasn't being honoured.
+#
+# This is a real behaviour change, so it is deliberately visible rather than
+# silent: the resolved model/effort is printed by `queue add`, shown in
+# `queue list`, and logged per prompt. An explicit `model:`/`effort:` header
+# always wins over a tier marker, and `--no-tiers` on `execute` turns the
+# mapping off entirely.
+_TIER_RE = re.compile(r"\*{0,2}TIER\s*:\s*([A-Za-z]+)", re.IGNORECASE)
+TIER_MAP: dict[str, tuple[str | None, str | None]] = {
+    # tier -> (model, effort)
+    "opus": ("opus", "high"),
+    "sonnet": ("sonnet", "medium"),
+    "haiku": ("haiku", "low"),
+    "cheap": ("haiku", "low"),
+}
+# Only look for a tier marker near the top of a block; the word could plausibly
+# appear in prose further down, and a marker buried on line 40 isn't front
+# matter anyway.
+_TIER_SCAN_CHARS = 300
 
 
 class QueueManager:
@@ -49,16 +85,20 @@ class QueueManager:
         text: str | None = None,
         file_path: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
         origin_file: str | None = None,
+        use_tiers: bool = True,
     ) -> str:
         """Add a prompt (from raw text or a file) and return its generated id.
 
-        If ``text``/the file's content starts with a ``model: <name>`` header
-        line followed by a blank line, that header is stripped from the
-        stored prompt text and used as the prompt's model — unless ``model``
-        is passed explicitly, which always takes precedence. ``origin_file``
-        marks a prompt as loaded from a markdown queue source (see
-        :func:`import_from_markdown`) rather than added directly.
+        If ``text``/the file's content starts with ``model:``/``effort:``
+        header lines followed by a blank line, those are stripped from the
+        stored prompt text and applied to the prompt — unless the matching
+        argument is passed explicitly, which always takes precedence. Failing
+        both, a ``TIER:`` marker near the top of the block supplies defaults
+        (see :data:`TIER_MAP`); pass ``use_tiers=False`` to ignore markers.
+        ``origin_file`` marks a prompt as loaded from a markdown queue source
+        (see :func:`import_from_markdown`) rather than added directly.
         """
         if bool(text) == bool(file_path):
             raise ValueError("Provide exactly one of `text` or `file_path`.")
@@ -72,8 +112,14 @@ class QueueManager:
             source = "file"
 
         text = text or ""
-        header_model, text = self._extract_model_header(text)
-        model = model or header_model
+        headers, text = self._extract_headers(text)
+        tier_model, tier_effort = self._tier_defaults(text) if use_tiers else (None, None)
+        # Precedence, most explicit first: caller argument, front matter, tier
+        # marker. A tier marker is the weakest signal because it's a hint
+        # written for a human reader that Sandglass happens to be able to use.
+        model = model or headers.get("model") or tier_model
+        effort = effort or headers.get("effort") or tier_effort
+        isolate = headers.get("isolate", "").strip().lower() in _TRUTHY
 
         queue = self.load_queue()
         prompt_id = f"{len(queue) + 1:03d}"
@@ -84,16 +130,19 @@ class QueueManager:
             source=source,
             file_path=file_path,
             model=model,
+            effort=effort,
             origin_file=origin_file,
+            isolate=isolate,
         )
         queue.append(prompt)
         self.save_queue(queue)
         logger.info(
-            "Added prompt %s to queue (source=%s, model=%s)", prompt_id, source, model or "default"
+            "Added prompt %s to queue (source=%s, model=%s, effort=%s)",
+            prompt_id, source, model or "default", effort or "default",
         )
         return prompt_id
 
-    def import_from_markdown(self, source_file: str) -> int:
+    def import_from_markdown(self, source_file: str, use_tiers: bool = True) -> int:
         """Load every `====`-delimited block from ``source_file`` into the queue.
 
         Each block goes through the same model-header parsing as
@@ -105,7 +154,9 @@ class QueueManager:
         """
         blocks = prompt_source.read_blocks(source_file)
         for block in blocks:
-            self.add_prompt(text=block["text"], origin_file=source_file)
+            self.add_prompt(
+                text=block["text"], origin_file=source_file, use_tiers=use_tiers
+            )
         if blocks:
             logger.info("Imported %d prompt(s) from %s", len(blocks), source_file)
         return len(blocks)
@@ -141,26 +192,46 @@ class QueueManager:
     # --- Helpers ----------------------------------------------------------
 
     @staticmethod
-    def _extract_model_header(text: str) -> tuple[str | None, str]:
-        """Strip a leading ``model: <name>`` header (blank line, then body).
+    def _extract_headers(text: str) -> tuple[dict[str, str], str]:
+        """Strip leading ``key: value`` front matter (blank line, then body).
 
         Deliberately strict — a bare match on line 1 isn't enough, since a
-        genuine prompt could start with the word "model:". Requiring an
-        empty line 2 keeps false positives effectively impossible while still
-        matching the plain front-matter style shown in the docs:
+        genuine prompt could start with the word "model:". Requiring the header
+        block to be followed by an empty line keeps false positives effectively
+        impossible while still matching the plain front-matter style shown in
+        the docs:
 
             model: Opus
+            effort: low
 
             Do this and that...
         """
         lines = text.splitlines()
-        if len(lines) >= 2:
-            match = _MODEL_HEADER_RE.match(lines[0].strip())
-            if match and lines[1].strip() == "":
-                model = match.group(1).strip()
-                body = "\n".join(lines[2:]).lstrip("\n")
-                return model, body
-        return None, text
+        headers: dict[str, str] = {}
+        idx = 0
+        while idx < len(lines):
+            match = _HEADER_RE.match(lines[idx].strip())
+            if not match:
+                break
+            headers[match.group(1).lower()] = match.group(2).strip()
+            idx += 1
+        # No headers, or nothing after them, or no blank line separating them
+        # from the body -> treat the whole thing as literal prompt text.
+        if not headers or idx >= len(lines) or lines[idx].strip() != "":
+            return {}, text
+        return headers, "\n".join(lines[idx + 1:]).lstrip("\n")
+
+    @staticmethod
+    def _tier_defaults(text: str) -> tuple[str | None, str | None]:
+        """Model/effort implied by a `TIER:` marker near the top of a block.
+
+        Returns ``(None, None)`` when there is no recognised marker. See
+        :data:`TIER_MAP` for why this is read at all.
+        """
+        match = _TIER_RE.search(text[:_TIER_SCAN_CHARS])
+        if not match:
+            return None, None
+        return TIER_MAP.get(match.group(1).lower(), (None, None))
 
     @staticmethod
     def _derive_title(text: str, file_path: str | None) -> str:

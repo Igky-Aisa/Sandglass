@@ -26,6 +26,15 @@ from .models import Response
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-opus-4-8"
+# `claude` normally bakes per-machine facts (cwd, env info, memory paths, git
+# status) into the system prompt. Git status in particular changes every time a
+# prompt writes a file, which shifts the prompt prefix and forces the whole
+# cached span after it to be re-created instead of read -- and cache creation
+# is billed at a multiple of base rate while a cache read is a fraction of it.
+# Moving those sections into the first user message keeps the prefix stable
+# across blocks. Harmless for unattended runs: the same facts still reach the
+# model, just later in the prompt.
+STABLE_PREFIX_FLAG = "--exclude-dynamic-system-prompt-sections"
 # Sandglass's whole point is unattended batch execution -- there's no one
 # around to answer an interactive permission prompt -- so it defaults to full
 # tool access rather than stalling/silently-denying on the first tool a
@@ -59,9 +68,20 @@ class QuotaExceededError(RuntimeError):
     polling blindly.
     """
 
-    def __init__(self, message: str, rate_limit_info: Optional[dict] = None):
+    def __init__(
+        self,
+        message: str,
+        rate_limit_info: Optional[dict] = None,
+        session_id: Optional[str] = None,
+    ):
         super().__init__(message)
         self.rate_limit_info = rate_limit_info
+        # The session the interrupted attempt was running in, if it got far
+        # enough to have one. Carried on the exception because this is exactly
+        # the case resuming exists for -- a quota hit part-way through real
+        # work -- and without it the retry would throw that work away and
+        # start cold, which is the failure chaining is meant to prevent.
+        self.session_id = session_id
 
     @property
     def resets_at(self) -> Optional[int]:
@@ -71,6 +91,16 @@ class QuotaExceededError(RuntimeError):
         return None
 
 
+class SessionNotResumableError(RuntimeError):
+    """Raised when `--resume <id>` names a session the CLI can't find.
+
+    Not a real failure — the prompt simply has to start over. Split out from
+    :class:`RuntimeError` so :meth:`ClaudeClient.send_prompt` can retry itself
+    from a clean session instead of surfacing a confusing error for what is
+    really just a cold start.
+    """
+
+
 class ClaudeClient:
     """Thin async wrapper around `claude -p` (Claude Code headless mode)."""
 
@@ -78,9 +108,16 @@ class ClaudeClient:
         self,
         model: str = DEFAULT_MODEL,
         permission_mode: str = DEFAULT_PERMISSION_MODE,
+        effort: Optional[str] = None,
+        budget_usd: Optional[float] = None,
+        stable_prefix: bool = True,
     ):
         self.model = model
         self.permission_mode = permission_mode
+        # Run-wide defaults; a queued prompt can override `effort` per block.
+        self.effort = effort
+        self.budget_usd = budget_usd
+        self.stable_prefix = stable_prefix
         self._cli_path = shutil.which("claude")
 
     @property
@@ -112,24 +149,53 @@ class ClaudeClient:
         text: str,
         on_chunk: Optional[Callable[[str], None]] = None,
         model: Optional[str] = None,
+        effort: Optional[str] = None,
+        resume_session_id: Optional[str] = None,
+        persist_session: bool = True,
+        _retried: bool = False,
     ) -> Response:
         """Run ``text`` through `claude -p`, streaming the reply.
 
-        ``model`` overrides ``self.model`` for just this call (used for
-        per-prompt model overrides from the queue). Calls
+        ``model``/``effort`` override the client defaults for just this call
+        (used for per-prompt overrides from the queue). Calls
         ``on_chunk(text_piece)`` for each streamed text delta (for live
         progress) and returns a fully accumulated :class:`Response`. Raises
         :class:`QuotaExceededError` if Claude Code reports the subscription's
         usage limit is hit, or :class:`RuntimeError` for any other failure.
+
+        Session handling has three shapes:
+
+        - ``resume_session_id`` set — continue that conversation. Everything it
+          already read and wrote is a cached prefix, so the work comes back at
+          a fraction of re-deriving it, and the model knows which files it has
+          already written (which is what stops a resumed run concluding
+          "already done" and tripping the artifact gate).
+        - ``persist_session=True`` with no id — a normal run whose session the
+          CLI creates and names; the id it chose comes back on the response so
+          the caller can resume it later.
+        - ``persist_session=False`` — nothing written to disk, nothing
+          resumable.
+
+        Deliberately never passes ``--session-id``. Naming a session up front
+        means guessing whether the CLI has already created it, and guessing
+        wrong is unrecoverable in the worst way: an id that was created but not
+        recorded fails every subsequent attempt with "already in use", forever,
+        with no way for the queue to move. Letting the CLI assign the id and
+        reading it back off the result removes that class of failure entirely.
         """
         if not self._cli_path:
             raise ClaudeCLINotFoundError()
 
         effective_model = self._normalize_model(model) if model else self.model
+        effective_effort = effort or self.effort
 
         logger.info(
-            "Sending prompt to Claude Code CLI (model=%s, chars=%d, permission_mode=%s)",
-            effective_model, len(text), self.permission_mode,
+            "Sending prompt to Claude Code CLI (model=%s, effort=%s, chars=%d, "
+            "permission_mode=%s, session=%s)",
+            effective_model, effective_effort or "default", len(text),
+            self.permission_mode,
+            f"resuming {resume_session_id}" if resume_session_id
+            else ("new" if persist_session else "ephemeral"),
         )
 
         cmd = [
@@ -138,10 +204,19 @@ class ClaudeClient:
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
-            "--no-session-persistence",
             "--permission-mode", self.permission_mode,
             "--model", effective_model,
         ]
+        if resume_session_id:
+            cmd += ["--resume", resume_session_id]
+        elif not persist_session:
+            cmd.append("--no-session-persistence")
+        if self.stable_prefix:
+            cmd.append(STABLE_PREFIX_FLAG)
+        if effective_effort:
+            cmd += ["--effort", effective_effort]
+        if self.budget_usd is not None:
+            cmd += ["--max-budget-usd", str(self.budget_usd)]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -153,6 +228,7 @@ class ClaudeClient:
         pieces: list[str] = []
         final_result: Optional[dict] = None
         rate_limit_info: Optional[dict] = None
+        observed_session_id: Optional[str] = None
 
         assert proc.stdout is not None
         try:
@@ -164,6 +240,13 @@ class ClaudeClient:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+
+                # Every event carries the session it belongs to; the init event
+                # arrives before any work, so this is known even if the run
+                # then fails. It's how the caller learns which conversation to
+                # resume without ever having to name one.
+                if not observed_session_id and event.get("session_id"):
+                    observed_session_id = event["session_id"]
 
                 etype = event.get("type")
                 if etype == "rate_limit_event":
@@ -192,29 +275,119 @@ class ClaudeClient:
 
         stderr_data = await proc.stderr.read()
         exit_code = await proc.wait()
+        stderr_text = stderr_data.decode("utf-8", errors="replace").strip()
 
+        # A rejected session never produces a `result` event at all -- the CLI
+        # refuses on stderr and exits. Both failure shapes therefore have to
+        # reach the same recovery below; an earlier version only handled the
+        # `result`-event shape, which made a stale session id an unrecoverable
+        # deadlock: every attempt failed identically and the queue never moved.
+        error_text: Optional[str] = None
         if final_result is None:
-            stderr_text = stderr_data.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(
-                stderr_text or f"claude exited with code {exit_code} and produced no result"
+            error_text = (
+                stderr_text
+                or f"claude exited with code {exit_code} and produced no result"
+            )
+        elif final_result.get("is_error") or exit_code != 0:
+            error_text = (
+                final_result.get("result")
+                or stderr_text
+                or "Unknown error from claude CLI"
             )
 
-        if final_result.get("is_error") or exit_code != 0:
-            error_text = final_result.get("result") or "Unknown error from claude CLI"
+        if error_text is not None:
             logger.error("claude CLI reported an error: %s", error_text)
             if self._looks_like_quota_error(error_text, rate_limit_info):
-                raise QuotaExceededError(error_text, rate_limit_info=rate_limit_info)
+                raise QuotaExceededError(
+                    error_text,
+                    rate_limit_info=rate_limit_info,
+                    session_id=observed_session_id or resume_session_id,
+                )
+            if (
+                resume_session_id
+                and not _retried
+                and self._looks_like_unusable_session(error_text)
+            ):
+                # The conversation we meant to continue can't be joined --
+                # missing, locked by another process, or otherwise unusable.
+                # Nothing is actually wrong with the prompt, so run it in a
+                # fresh session rather than reporting a failure a human has to
+                # decode. Costs a cold start; beats stopping the batch.
+                logger.warning(
+                    "Session %s is unusable (%s); running this prompt in a new session.",
+                    resume_session_id, error_text,
+                )
+                return await self.send_prompt(
+                    text, on_chunk, model=model, effort=effort,
+                    resume_session_id=None, persist_session=True, _retried=True,
+                )
             raise RuntimeError(error_text)
 
         usage = final_result.get("usage", {}) or {}
-        tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
-        logger.info("Received response from Claude Code CLI (tokens=%d)", tokens)
+        response = self._response_from_usage(
+            usage,
+            text=final_result.get("result") or "".join(pieces),
+            model=effective_model,
+            cost_usd=final_result.get("total_cost_usd") or 0.0,
+        )
+        response.session_id = final_result.get("session_id") or observed_session_id
+        logger.info(
+            "Received response from Claude Code CLI (billed=%d tokens "
+            "[in=%d out=%d cache_write=%d cache_read=%d], cost=$%.4f)",
+            response.tokens_used, response.input_tokens, response.output_tokens,
+            response.cache_creation_tokens, response.cache_read_tokens,
+            response.cost_usd,
+        )
+        return response
 
+    @staticmethod
+    def _response_from_usage(
+        usage: dict, *, text: str, model: str, cost_usd: float
+    ) -> Response:
+        """Build a :class:`Response` from the CLI's ``result.usage`` object.
+
+        Counts all four token buckets, not just ``input_tokens`` +
+        ``output_tokens``. On a cached prompt ``input_tokens`` reports only the
+        *uncached remainder*, so the naive sum silently omits the dominant
+        term: a measured run billing 23,788 tokens reported 53 that way.
+        """
+        input_tokens = usage.get("input_tokens") or 0
+        output_tokens = usage.get("output_tokens") or 0
+        cache_creation = usage.get("cache_creation_input_tokens") or 0
+        cache_read = usage.get("cache_read_input_tokens") or 0
         return Response(
             prompt_id="",
-            text=final_result.get("result") or "".join(pieces),
-            tokens_used=tokens,
-            model=effective_model,
+            text=text,
+            tokens_used=input_tokens + output_tokens + cache_creation + cache_read,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_tokens=cache_creation,
+            cache_read_tokens=cache_read,
+            cost_usd=float(cost_usd or 0.0),
+        )
+
+    @staticmethod
+    def _looks_like_unusable_session(text: str) -> bool:
+        """Whether an error means "that conversation can't be joined".
+
+        Covers both directions — the session is missing, or it exists but is
+        locked/in use by something else — because the recovery is the same
+        either way: run this prompt in a fresh session. Matched on text
+        because the CLI reports these as plain error output with no
+        machine-readable code; the alternative is treating an entirely
+        recoverable condition as a hard stop.
+        """
+        lowered = (text or "").lower()
+        if "session" not in lowered and "conversation" not in lowered:
+            return False
+        return any(
+            kw in lowered
+            for kw in (
+                "not found", "no conversation", "does not exist", "no such",
+                "already exists", "already in use", "in use", "duplicate",
+                "locked", "cannot be resumed", "could not be resumed",
+            )
         )
 
     @staticmethod

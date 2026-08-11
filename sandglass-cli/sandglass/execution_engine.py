@@ -19,7 +19,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from . import notify, prompt_source, workspace
+from . import notify, project_docs, prompt_source, workspace
 from .claude_client import ClaudeClient, QuotaExceededError
 from .models import ExecutionResult, PromptObject, Response
 from .queue_manager import QueueManager
@@ -53,6 +53,51 @@ SUMMARY_MAX = 80
 # working directory: Sandglass is a generic tool and shouldn't invent this
 # project-specific convention for someone else's repo.
 WORK_LOG_PATH = os.path.join("master_plan", "work_log.md")
+
+# How prompts map onto Claude Code sessions.
+#
+# `chain` is the default because Sandglass's whole job is running a queue
+# unattended, and a queue run as N cold starts pays every fixed cost N times:
+# the system prompt, the tool schemas, the project's CLAUDE.md, and whatever
+# files the previous block already read and understood. Measured on a real
+# project, that floor was ~24k tokens of prefix plus ~100k of mandated reading
+# *before any block did work of its own*. Chained, the queue pays it once and
+# every later block reads it back from cache at a fraction of the price.
+#
+# The cost of chaining is that blocks are no longer hermetic: block 6 can see
+# what block 5 did, including block 5's mistakes. That is mitigated (a turn
+# separator marks each new task, and a single block can opt out with
+# `isolate: true`) rather than eliminated, so the other two modes stay
+# available for queues where independence matters more than cost.
+SESSION_MODE_CHAIN = "chain"      # one session for the whole queue drain
+SESSION_MODE_PROMPT = "prompt"    # one session per prompt; retries resume, blocks don't share
+SESSION_MODE_ISOLATE = "isolate"  # no persisted session at all (pre-0.10 behaviour)
+SESSION_MODES = (SESSION_MODE_CHAIN, SESSION_MODE_PROMPT, SESSION_MODE_ISOLATE)
+
+# A chained session is rejoined only while it's plausibly still the same piece
+# of work. A queue picked up days later should start clean: the conversation
+# would be stale, its cache long expired, and its context pure overhead.
+CHAIN_MAX_AGE_SECONDS = 24 * 60 * 60
+
+# Prepended to every block after the first in a chained session. Without it the
+# model reads a new block as a continuation of the last one and keeps working
+# on the previous task; with it, blocks stay distinct for ~40 tokens, against
+# the several thousand a cold start would cost to achieve the same separation.
+CHAIN_TURN_SEPARATOR = (
+    "---\n"
+    "The previous task is finished. What follows is a **new, independent task** "
+    "in the same project. Earlier context in this session is available if it "
+    "helps, but do not resume, extend, or redo earlier work unless this task "
+    "explicitly asks for it. Treat anything the previous task got wrong as "
+    "history, not as your problem to fix.\n"
+    "---\n"
+)
+
+# Bumped when the meaning of a recorded token count changes. Schema 1 summed
+# only input+output, which omitted cache tokens entirely and so undercounted
+# any cached run severely; schema 2 counts everything billed and records cost.
+# History entries carry this so the two are never compared as if equivalent.
+ACCOUNTING_SCHEMA = 2
 
 # --- Quota-wait hourglass animation ---------------------------------------
 # A compact, terminal-style ASCII sandglass shown in place of a static
@@ -252,6 +297,8 @@ class ExecutionEngine:
         claude_client: ClaudeClient,
         storage: StorageService | None = None,
         require_artifact: bool = True,
+        session_mode: str = SESSION_MODE_CHAIN,
+        brief: bool = True,
     ):
         self.queue_manager = queue_manager
         self.claude_client = claude_client
@@ -261,6 +308,15 @@ class ExecutionEngine:
         # and what it cost to learn. Only meaningful for markdown-sourced prompts;
         # `queue add` prompts have no source file to protect.
         self.require_artifact = require_artifact
+        # How prompts map onto Claude Code sessions -- see SESSION_MODES.
+        if session_mode not in SESSION_MODES:
+            raise ValueError(
+                f"session_mode must be one of {', '.join(SESSION_MODES)}, got {session_mode!r}"
+            )
+        self.session_mode = session_mode
+        # Prepend a bounded project-state brief instead of letting each cold
+        # block re-read the whole work log. See sandglass/project_docs.py.
+        self.brief = brief
 
     # --- Public API -------------------------------------------------------
 
@@ -279,6 +335,9 @@ class ExecutionEngine:
         total = len(prompts)
         results: list[Response] = []
         total_tokens = 0
+        total_cost = 0.0
+        total_cache_read = 0
+        total_cache_creation = 0
         failed = 0
         stopped_reason: str | None = None
         resume_at: str | None = None
@@ -381,6 +440,9 @@ class ExecutionEngine:
 
             results.append(response)
             total_tokens += response.tokens_used
+            total_cost += response.cost_usd
+            total_cache_read += response.cache_read_tokens
+            total_cache_creation += response.cache_creation_tokens
             self._archive_prompt(prompt, response)
             if work_log_before is not None and self._work_log_snapshot() == work_log_before:
                 # The prompt's own headless run didn't touch work_log.md itself
@@ -392,22 +454,35 @@ class ExecutionEngine:
             if prompt.origin_file:
                 self._cut_from_source(prompt, response)
 
+        # The drain is over — end the chain so the next `sandglass execute`
+        # opens a fresh conversation rather than appending unrelated work to
+        # this one. Only on a clean finish: a run stopped by a quota hit or a
+        # refusal is *not* over, and its remaining blocks must rejoin the same
+        # session when it picks back up.
+        if stopped_reason is None and not self.queue_manager.load_queue():
+            self._clear_run_state()
+
         elapsed = time.monotonic() - start
         logger.info(
-            "Queue execution finished (completed=%d, failed=%d, tokens=%d, seconds=%.1f, stopped_reason=%s)",
-            len(results), failed, total_tokens, elapsed, stopped_reason,
+            "Queue execution finished (completed=%d, failed=%d, tokens=%d, cost=$%.4f, "
+            "cache_read=%d, cache_write=%d, seconds=%.1f, stopped_reason=%s)",
+            len(results), failed, total_tokens, total_cost, total_cache_read,
+            total_cache_creation, elapsed, stopped_reason,
         )
-        self._print_summary(results, failed, total_tokens, elapsed, stopped_reason)
-
-        return ExecutionResult(
+        result = ExecutionResult(
             completed=len(results),
             failed=failed,
             total_tokens=total_tokens,
+            total_cost_usd=total_cost,
+            total_cache_read_tokens=total_cache_read,
+            total_cache_creation_tokens=total_cache_creation,
             total_time=elapsed,
             responses=results,
             stopped_reason=stopped_reason,
             resume_at=resume_at,
         )
+        self._print_summary(result, elapsed, stopped_reason)
+        return result
 
     async def run_with_auto_resume(
         self,
@@ -543,7 +618,33 @@ class ExecutionEngine:
     async def execute_prompt(self, prompt: PromptObject) -> Response:
         """Send a single prompt to Claude Code with a live progress spinner."""
         effective_model = prompt.model or self.claude_client.model
-        console.print(f"  📤 Sending to Claude ({effective_model})...")
+        effective_effort = prompt.effort or self.claude_client.effort
+
+        resume_session_id, persist_session = self._resolve_session(prompt)
+        resuming = resume_session_id is not None
+
+        label = f"  📤 Sending to Claude ({effective_model}"
+        if effective_effort:
+            label += f", effort={effective_effort}"
+        if resuming:
+            label += ", warm session"
+        elif not persist_session:
+            label += ", isolated"
+        console.print(label + ")...")
+
+        # A resumed session already carries the project brief in its history,
+        # and already knows the previous task ended -- so a warm block needs a
+        # turn separator instead, which is two orders of magnitude cheaper than
+        # re-sending the brief and is what keeps the new task from being read
+        # as a continuation of the last one.
+        if resuming:
+            text = CHAIN_TURN_SEPARATOR + prompt.text
+        else:
+            text = project_docs.apply_brief(
+                prompt.text,
+                project_docs.build_brief(cwd=self._project_dir(prompt))
+                if self.brief else None,
+            )
 
         start = time.monotonic()
         chars_received = 0
@@ -565,18 +666,159 @@ class ExecutionEngine:
                 chars_received += len(piece)
                 progress.update(task, description=f"{chars_received:,} chars received")
 
-            response = await self.claude_client.send_prompt(
-                prompt.text, on_chunk, model=prompt.model
-            )
+            try:
+                response = await self.claude_client.send_prompt(
+                    text,
+                    on_chunk,
+                    model=prompt.model,
+                    effort=prompt.effort,
+                    resume_session_id=resume_session_id,
+                    persist_session=persist_session,
+                )
+            except QuotaExceededError as exc:
+                # A quota hit part-way through real work is the case resuming
+                # exists for, so record the session before letting the error
+                # propagate -- otherwise the retry starts cold and re-derives
+                # everything the interrupted attempt had already worked out.
+                if persist_session and exc.session_id:
+                    self._record_session(prompt, exc.session_id)
+                raise
+
+        # Record the session the CLI actually used, which is not always the one
+        # we asked for -- an unusable session makes the client fall back to a
+        # fresh one. Recording what happened rather than what was intended is
+        # what keeps the chain pointing at a conversation that exists.
+        if persist_session and response.session_id:
+            self._record_session(prompt, response.session_id)
 
         response.prompt_id = prompt.id
         elapsed_min = (time.monotonic() - start) / 60
         console.print(
-            f"  ✅ Done ({response.tokens_used:,} tokens, {elapsed_min:.1f} min)"
+            f"  ✅ Done ({response.tokens_used:,} tokens billed, "
+            f"${response.cost_usd:.2f}, {elapsed_min:.1f} min)"
         )
 
         self._save_response(prompt, response)
         return response
+
+    @staticmethod
+    def _project_dir(prompt: PromptObject) -> str | None:
+        """Directory whose `master_plan/` describes this prompt's project.
+
+        Anchored on the markdown queue source for the same reason the artifact
+        gate is: that file lives in the repo the prompt is about, which is not
+        necessarily the directory Sandglass was invoked from.
+        """
+        if prompt.origin_file:
+            return os.path.dirname(os.path.abspath(prompt.origin_file)) or None
+        return None
+
+    # --- Session continuity ------------------------------------------------
+
+    def _resolve_session(self, prompt: PromptObject) -> tuple[str | None, bool]:
+        """How this prompt should be run, as ``(resume_session_id, persist)``.
+
+        ``(None, True)`` means "a normal run whose session the CLI will create
+        and name" — nothing is ever named up front. Sandglass learns the id
+        from the response and resumes *that*, which is the only way the
+        recorded session is guaranteed to be one that actually exists.
+        """
+        if self.session_mode == SESSION_MODE_ISOLATE or prompt.isolate:
+            # `isolate: true` on a single block is the escape hatch for work
+            # that must not inherit context: a review that shouldn't see the
+            # implementation's own rationalisations, a from-scratch second
+            # opinion. The chain simply skips it and continues after.
+            return None, False
+
+        if self.session_mode == SESSION_MODE_PROMPT:
+            # One session per prompt: a retry resumes where the interrupted
+            # attempt stopped, but blocks never see each other.
+            return prompt.session_id, True
+
+        return self._chained_session_id(), True
+
+    def _chained_session_id(self) -> str | None:
+        """The conversation this queue drain is running in, if one exists yet.
+
+        ``None`` means the chain hasn't started — the next prompt opens it. A
+        stored session older than :data:`CHAIN_MAX_AGE_SECONDS` is discarded
+        rather than rejoined: an old conversation's context is stale, its cache
+        has long expired, and carrying it forward is pure overhead.
+        """
+        state = self.storage.load_json(self.storage.run_state_path)
+        if not isinstance(state, dict):
+            return None
+        session_id = state.get("session_id")
+        started_at = state.get("started_at")
+        if not session_id or not started_at:
+            return None
+        age = time.time() - float(started_at)
+        if age > CHAIN_MAX_AGE_SECONDS:
+            logger.info(
+                "Chained session %s is %.1fh old; starting a fresh one.",
+                session_id, age / 3600,
+            )
+            self._clear_run_state()
+            return None
+        return session_id
+
+    def _record_session(self, prompt: PromptObject, session_id: str) -> None:
+        """Remember the session a prompt just ran in, so the next one joins it.
+
+        Only ever called with an id the CLI reported, i.e. a conversation that
+        demonstrably exists. Writing a *hoped-for* id here is what previously
+        turned a single failed attempt into a permanently stuck queue.
+        """
+        if self.session_mode == SESSION_MODE_PROMPT:
+            if prompt.session_id != session_id:
+                prompt.session_id = session_id
+                self._persist_prompt_session(prompt)
+            return
+        if self.session_mode != SESSION_MODE_CHAIN:
+            return
+        state = self.storage.load_json(self.storage.run_state_path)
+        if isinstance(state, dict) and state.get("session_id") == session_id:
+            return
+        self._save_run_state(
+            {"session_id": session_id, "started_at": time.time()}
+        )
+
+    def _save_run_state(self, state: dict) -> None:
+        try:
+            self.storage.save_json(self.storage.run_state_path, state)
+        except OSError as exc:
+            # Losing this costs a cold start, which is the old behaviour --
+            # never a reason to abort a run that is otherwise fine.
+            logger.warning("Could not persist chained session state: %s", exc)
+
+    def _clear_run_state(self) -> None:
+        """End the chain. The next `sandglass execute` starts a new session."""
+        try:
+            if os.path.exists(self.storage.run_state_path):
+                os.remove(self.storage.run_state_path)
+        except OSError as exc:
+            logger.warning("Could not clear chained session state: %s", exc)
+
+    def _persist_prompt_session(self, prompt: PromptObject) -> None:
+        """Write a per-prompt session id back to the queue file.
+
+        Best-effort: failing to record it costs a restart on the next attempt,
+        which is exactly the old behaviour, so it must never abort the run.
+        """
+        try:
+            queue = self.queue_manager.load_queue()
+            for entry in queue:
+                if entry.id == prompt.id:
+                    entry.session_id = prompt.session_id
+                    break
+            else:
+                return
+            self.queue_manager.save_queue(queue)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Could not persist session id for prompt %s (%s); a retry will "
+                "start it fresh instead of resuming.", prompt.id, exc,
+            )
 
     # --- Persistence helpers ---------------------------------------------
 
@@ -594,6 +836,14 @@ class ExecutionEngine:
                 "tokens_used": response.tokens_used,
                 "completion_time": response.completion_time,
                 "model": response.model,
+                "usage": {
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "cache_creation_tokens": response.cache_creation_tokens,
+                    "cache_read_tokens": response.cache_read_tokens,
+                },
+                "cost_usd": response.cost_usd,
+                "session_id": prompt.session_id,
             }
             self.storage.save_json(path, payload)
         except OSError as exc:
@@ -616,6 +866,18 @@ class ExecutionEngine:
                     },
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                     "tokens_used": response.tokens_used,
+                    "cost_usd": response.cost_usd,
+                    "usage": {
+                        "input_tokens": response.input_tokens,
+                        "output_tokens": response.output_tokens,
+                        "cache_creation_tokens": response.cache_creation_tokens,
+                        "cache_read_tokens": response.cache_read_tokens,
+                    },
+                    # Entries written before full-usage accounting counted only
+                    # input+output and are therefore large undercounts. Stamped
+                    # so `sandglass history` can say so instead of quietly
+                    # averaging two incompatible numbers together.
+                    "accounting": ACCOUNTING_SCHEMA,
                 }
             )
             self.storage.save_json(self.storage.history_path, {"completed": completed})
@@ -714,7 +976,9 @@ class ExecutionEngine:
                 "- **Previous Blocker**: N/A\n\n"
                 "### 2. Work Done\n"
                 f"- {summary}\n"
-                f"- {response.tokens_used:,} tokens used\n\n"
+                f"- {response.tokens_used:,} tokens billed "
+                f"({response.cache_read_tokens:,} read from cache), "
+                f"${response.cost_usd:.2f}\n\n"
                 "### 3. Next Steps (For the next agent)\n"
                 f"- Auto-logged entry, not a full report -- see "
                 f"`.sandglass/responses/response_{prompt.id}.json` for the full response "
@@ -745,19 +1009,31 @@ class ExecutionEngine:
 
     def _print_summary(
         self,
-        results: list[Response],
-        failed: int,
-        total_tokens: int,
+        result: ExecutionResult,
         elapsed: float,
         stopped_reason: str | None = None,
     ) -> None:
+        results = result.responses
         console.print()
         heading = "Queue Complete!" if not stopped_reason else "Batch Paused"
         console.print(f"[bold]{heading}[/bold]")
         console.print(f"  ✅ {len(results)} prompt(s) executed")
-        if failed:
-            console.print(f"  ✖ {failed} failed")
-        console.print(f"  💰 {total_tokens:,} tokens used")
+        if result.failed:
+            console.print(f"  ✖ {result.failed} failed")
+        console.print(
+            f"  💰 {result.total_tokens:,} tokens billed  ·  "
+            f"${result.total_cost_usd:.2f}"
+        )
+        cached = result.total_cache_read_tokens + result.total_cache_creation_tokens
+        if cached:
+            # The split, not the total, is the number worth watching: reads are
+            # a fraction of base price while writes are a multiple of it, so a
+            # run that is mostly writes is re-creating a prefix it never reuses.
+            share = result.total_cache_read_tokens / cached * 100
+            console.print(
+                f"  ♻️ cache: {result.total_cache_read_tokens:,} read / "
+                f"{result.total_cache_creation_tokens:,} written ({share:.0f}% reused)"
+            )
         console.print(f"  ⏱️ {elapsed / 60:.1f} minutes")
         if results:
             console.print("  what has been done:")
