@@ -85,6 +85,72 @@ def cut_first_block(file_path: str) -> str | None:
     return block["text"]
 
 
+# A block's identity is its own first markdown heading -- the one thing that
+# survives a block being re-authored, because the heading names the deliverable
+# ("### P6.04 — MT5 polling → diffed events") while the body around it changes.
+_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+# Below this length a heading is something like "## Notes" and would prefix-match
+# half the file. Not enough to identify anything, so it isn't used as evidence.
+_MIN_IDENTITY_CHARS = 8
+
+
+def _normalize_heading(text: str) -> str:
+    text = text.strip().lower().replace("—", "-").replace("–", "-")
+    text = re.sub(r"[`*_]", "", text)
+    return re.sub(r"\s+", " ", text)
+
+
+def block_identity(prompt_text: str) -> str | None:
+    """The normalized first heading of a block, or ``None`` if it has none."""
+    match = _HEADING_RE.search(prompt_text)
+    if not match:
+        return None
+    identity = _normalize_heading(match.group(1))
+    return identity if len(identity) >= _MIN_IDENTITY_CHARS else None
+
+
+def _has_heading(file_path: str, identity: str) -> bool:
+    """Whether any heading in ``file_path`` starts with ``identity``.
+
+    Prefix, not equality: a completed block's heading picks up a marker on the
+    way into the history file (``### P6.04 — … [executed 2026-08-11 …]``), and
+    it is still the same block.
+    """
+    if not os.path.exists(file_path):
+        return False
+    with open(file_path, "r", encoding="utf-8") as fh:
+        raw = fh.read()
+    return any(
+        _normalize_heading(m.group(1)).startswith(identity)
+        for m in _HEADING_RE.finditer(raw)
+    )
+
+
+def already_executed(source_file: str, prompt_text: str) -> bool:
+    """Whether this block has already been run and cut, by someone else.
+
+    The queue in `.sandglass/queue.json` and the blocks in `future_prompts.md`
+    are two copies of the same intent, and they drift: an interactive session
+    can execute a block and cut it from the markdown, or a run can be killed
+    after the cut but before the queue is updated. Sandglass then re-dispatches
+    finished work, the model correctly declines to redo it, nothing changes on
+    disk, and the artifact gate stops the whole queue -- a full block's cost to
+    be told the block was already done. (Measured once: $4.92 for one minute.)
+
+    Deliberately requires **positive evidence**, never inferring from absence.
+    A block missing from the source could just as easily have been re-authored,
+    and skipping real work would be far worse than re-running finished work. So
+    this returns True only when the block is gone from the source *and* present
+    in the sibling history file, which together mean exactly one thing: it ran.
+    """
+    identity = block_identity(prompt_text)
+    if not identity:
+        return False
+    if _has_heading(source_file, identity):
+        return False  # still pending -- this is the copy waiting to be run
+    return _has_heading(history_path_for(source_file), identity)
+
+
 def history_path_for(source_file: str) -> str:
     """The sibling history file a source file's completed blocks get archived to."""
     return os.path.join(os.path.dirname(source_file) or ".", "prompt_history.md")

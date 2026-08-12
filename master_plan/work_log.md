@@ -145,3 +145,20 @@
 ### 3. Next Steps (For the next agent)
 - **Chained-session cost is the open question.** Three blocks billed $38.30 (045 $7.40 → 046 $13.00 → 047 $17.90) with cache_read tracking the same curve (8.5M → 29.4M → 45.3M). Suspicion: in a chained session every API call re-reads the whole accumulated conversation, so per-block cost grows with queue position. If true, `chain` is cheaper only for short queues and should reset every N blocks. Measure before changing the default.
 - ntfy silently no-ops when `SANDGLASS_NTFY_TOPIC` is unset and prints no hint at run start — that gap cost this session an hour. Consider a one-line notice in `execute`.
+
+## 2026-08-12 - Opus 5 - Stop re-dispatching blocks another runner already finished
+
+### 1. Context Snapshot
+- **Goal**: A live block cost $4.92 and one minute to reply "P6.04 is already complete, I'm not redoing it", then tripped the artifact gate and stopped the queue.
+- **State**: `sandglass-cli/sandglass/prompt_source.py` (`already_executed`, `block_identity`), wired into `execution_engine.execute_queue`.
+- **Previous Blocker**: Resolved — the run that vanished mid-block had already done P6.04 and cut it from the markdown before dying.
+
+### 2. Work Done
+- **The queue and the markdown are two copies of one intent, and they drift.** An interactive session can execute a block and cut it; a run can die between the cut and the queue update. Sandglass then re-sends finished work. Fixed with a free pre-flight rather than a smarter refusal parser — no model involved, no tokens spent.
+- **Positive evidence only.** A skip requires the block to be *gone from the source* AND *present in the history file*. Absence alone is not evidence: a re-authored block is also absent, and silently skipping real work is far worse than paying to re-run finished work. The asymmetry drives the whole design.
+- **Identity is the block's first markdown heading**, prefix-matched — it names the deliverable and survives re-authoring, and the history copy gains an `[executed …]` suffix, which is why prefix and not equality.
+- Deliberately did NOT auto-retry the refusal. The gate exists because auto-cutting once destroyed twelve blocks; feeding "solve it" back to the model would re-introduce that on the model's word.
+
+### 3. Next Steps (For the next agent)
+- **Chained-session staleness is expensive.** Block 048 resumed a session hours old and paid 741k of cache *write* for 1,908 output tokens. `CHAIN_MAX_AGE_SECONDS` is 24h but the cache TTL is minutes; a resume past the TTL re-writes the entire accumulated context at 1.25-2x. Consider lowering it to ~1h so a cold start (cheap, bounded) beats a stale resume (unbounded, grows with the conversation).
+- Genuine dependency refusals still stop the run. A bounded "classify then act" recovery is designed but unbuilt — see the chat for the DONE/BLOCKED/NOOP shape.

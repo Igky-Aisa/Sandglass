@@ -299,6 +299,7 @@ class ExecutionEngine:
         require_artifact: bool = True,
         session_mode: str = SESSION_MODE_CHAIN,
         brief: bool = True,
+        skip_executed: bool = True,
     ):
         self.queue_manager = queue_manager
         self.claude_client = claude_client
@@ -317,6 +318,9 @@ class ExecutionEngine:
         # Prepend a bounded project-state brief instead of letting each cold
         # block re-read the whole work log. See sandglass/project_docs.py.
         self.brief = brief
+        # Drop queued blocks that some other runner already executed and cut.
+        # See prompt_source.already_executed for what counts as evidence.
+        self.skip_executed = skip_executed
 
     # --- Public API -------------------------------------------------------
 
@@ -339,6 +343,7 @@ class ExecutionEngine:
         total_cache_read = 0
         total_cache_creation = 0
         failed = 0
+        skipped = 0
         stopped_reason: str | None = None
         stopped_detail = ""
         resume_at: str | None = None
@@ -361,6 +366,30 @@ class ExecutionEngine:
             report.total_tokens = total_tokens
             report.total_cost_usd = total_cost
             run_report.save(self.storage, report)
+
+            # Free pre-flight: has someone already run and cut this block? The
+            # queue and the markdown drift (an interactive session cuts a block;
+            # a run dies between the cut and the queue update), and dispatching
+            # finished work costs a full block to be told it was finished. Only
+            # ever fires on positive evidence -- see prompt_source.already_executed.
+            if (
+                self.skip_executed
+                and prompt.origin_file
+                and prompt_source.already_executed(prompt.origin_file, prompt.text)
+            ):
+                console.print(
+                    "  [dim]↷ Already executed by someone else — the block is gone "
+                    f"from {prompt.origin_file} and recorded in its history file. "
+                    "Dropping it from the queue without spending a token.[/dim]"
+                )
+                logger.info(
+                    "Prompt %s was already executed and cut from %s; skipping",
+                    prompt.id, prompt.origin_file,
+                )
+                skipped += 1
+                self.queue_manager.remove_prompt(1)
+                continue
+
             work_log_before = self._work_log_snapshot()
             # Only measured for markdown-sourced prompts: the cut is the only
             # irreversible step, and `queue add` prompts have no block to cut.
@@ -494,6 +523,7 @@ class ExecutionEngine:
         result = ExecutionResult(
             completed=len(results),
             failed=failed,
+            skipped=skipped,
             total_tokens=total_tokens,
             total_cost_usd=total_cost,
             total_cache_read_tokens=total_cache_read,
@@ -1097,6 +1127,10 @@ class ExecutionEngine:
         console.print(f"  ✅ {len(results)} prompt(s) executed")
         if result.failed:
             console.print(f"  ✖ {result.failed} failed")
+        if result.skipped:
+            console.print(
+                f"  ↷ {result.skipped} skipped (already executed and cut elsewhere)"
+            )
         console.print(
             f"  💰 {result.total_tokens:,} tokens billed  ·  "
             f"${result.total_cost_usd:.2f}"

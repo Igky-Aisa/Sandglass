@@ -121,6 +121,9 @@ class ExecutionResult:
 
     completed: int = 0
     failed: int = 0
+    # Blocks dropped without being sent: some other runner already executed and
+    # cut them. Counted apart from `completed` because nothing was spent.
+    skipped: int = 0
     total_tokens: int = 0
     total_cost_usd: float = 0.0
     # Cache split across the whole run. Reported separately because the ratio

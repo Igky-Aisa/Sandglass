@@ -430,6 +430,17 @@ def execute(
             "read-only prompts (reviews, questions) that legitimately write nothing."
         ),
     ),
+    skip_executed: bool = typer.Option(
+        True,
+        "--skip-executed/--no-skip-executed",
+        help=(
+            "Before sending a block, drop it if some other runner already ran and "
+            "cut it — the block is gone from the source file and present in the "
+            "sibling history file. Costs nothing and prevents paying a full block "
+            "to be told the work was already done. Requires both facts, so a "
+            "re-authored block is never mistaken for a finished one."
+        ),
+    ),
     brief: bool = typer.Option(
         True,
         "--brief/--no-brief",
@@ -603,6 +614,7 @@ def execute(
     engine = ExecutionEngine(
         qm, client,
         require_artifact=require_artifact,
+        skip_executed=skip_executed,
         session_mode=session_mode,
         brief=brief,
     )
