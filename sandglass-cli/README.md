@@ -139,8 +139,30 @@ for any single command.
 | `sandglass execute --effort LEVEL` | Default reasoning depth for prompts that don't set their own |
 | `sandglass execute --budget-usd N` | Hard per-prompt spend cap (`claude --max-budget-usd`) |
 | `sandglass execute --no-tiers` | Ignore `TIER:` markers in block text |
+| `sandglass why` | Why the last run stopped — or what it's doing right now (see below) |
 | `sandglass rotate-logs [--keep N]` | Archive old `work_log.md` / `prompt_history.md` entries into `master_plan/archive/` |
 | `sandglass update [--check]` | Update Sandglass itself from the git repo (see Updating below) |
+
+#### `sandglass why`
+
+A queue runs unattended, so it usually stops while nobody is looking. Every run
+writes `.sandglass/last_run.json` as it goes, and prints a **Why it stopped**
+block when it ends; `sandglass why` prints that back later, after the terminal
+has scrolled or closed:
+
+```
+Why it stopped: Token limits hit
+  Claude reported the subscription's usage limit while running prompt 048.
+  Expected to refresh around 2026-08-11T22:20:00+00:00. 31 prompt(s) still queued.
+  │ You've hit your session limit · resets 6:20pm (America/Santiago)
+  Next: Re-run `sandglass execute` after the reset; it auto-waits and resumes
+  on its own unless you passed --once.
+```
+
+It distinguishes the endings that look alike from the outside: a quota **wait**
+in progress, a Ctrl-C, a crash, a block that produced no work product, and — the
+one nothing else can tell you — a run **killed from outside** (closed terminal,
+sleeping machine) that never got to write down why it vanished.
 
 ### History & responses
 

@@ -127,3 +127,21 @@
 ### 3. Next Steps (For the next agent)
 - The Azymetrix run is still the first real chained batch; the "measure a real chained batch" note in the entry above is unanswered. Block 1 billed 8.8M tokens / $7.40 with 98% cache reuse over 15.8 min — the reuse is right, the absolute size is not yet explained. Check whether one block really needs ~150 model turns or whether the artifact gate is provoking rework.
 - That account is at 75% of its seven-day quota (`allowed_warning` on the rate-limit event). A 33-block queue at block 1's cost will not fit; consider `--budget-usd` before the next `sandglass execute`.
+
+## 2026-08-11 - Opus 5 - `sandglass why`: a run that stops must say why, on disk
+
+### 1. Context Snapshot
+- **Goal**: A live Azymetrix batch stopped overnight and the only copy of the reason was terminal scrollback nobody read. Make the reason survive the terminal.
+- **State**: New `sandglass-cli/sandglass/run_report.py`; wired through `execution_engine.py`, `cli.py`, `storage.py`.
+- **Previous Blocker**: Resolved — the dash-prefix parse bug from the previous entry; blocks 046/047 then ran warm.
+
+### 2. Work Done
+- **Diagnosis had to be done by archaeology** (history.json rows, file mtimes, PID checks) because nothing recorded *why*. That's the bug: the tool is built to run unattended, so the moment it stops is by definition unwatched. Every run now writes `.sandglass/last_run.json` continuously and prints a "Why it stopped" panel.
+- **Kept separate from `run_state.json`.** That file is machinery the next run consumes; this one is prose a person reads. Merging them would tempt future code to branch on a diagnostic.
+- **The PID is the load-bearing part.** A run killed from outside never reaches its own ending, so a record stuck at `running` with a dead PID *is* the diagnosis. It reports "killed", names the in-flight prompt, and explicitly rules out quota and prompt failure — the two things a reader assumes otherwise.
+- Ctrl-C and unhandled exceptions are closed by `cli.py` via `engine.record_stop()`; a quota wait reports `waiting`, not `stopped`, while it is genuinely sleeping.
+- Detail text is stored verbatim, never paraphrased: the quota message carries its own reset time.
+
+### 3. Next Steps (For the next agent)
+- **Chained-session cost is the open question.** Three blocks billed $38.30 (045 $7.40 → 046 $13.00 → 047 $17.90) with cache_read tracking the same curve (8.5M → 29.4M → 45.3M). Suspicion: in a chained session every API call re-reads the whole accumulated conversation, so per-block cost grows with queue position. If true, `chain` is cheaper only for short queues and should reset every N blocks. Measure before changing the default.
+- ntfy silently no-ops when `SANDGLASS_NTFY_TOPIC` is unset and prints no hint at run start — that gap cost this session an hour. Consider a one-line notice in `execute`.

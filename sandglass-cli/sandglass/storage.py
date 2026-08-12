@@ -46,6 +46,16 @@ class StorageService:
         """
         return os.path.join(self.base_path, "run_state.json")
 
+    @property
+    def last_run_path(self) -> str:
+        """What the most recent `sandglass execute` is doing, and why it ended.
+
+        Separate from `run_state_path` on purpose: that one is machinery the
+        next run consumes, this one is an explanation a person reads (via
+        `sandglass why`). See sandglass/run_report.py.
+        """
+        return os.path.join(self.base_path, "last_run.json")
+
     # --- Directory management --------------------------------------------
 
     def ensure_dir(self, path: str) -> None:

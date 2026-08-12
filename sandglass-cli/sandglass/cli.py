@@ -21,7 +21,7 @@ from .execution_engine import (
     SESSION_MODES,
     ExecutionEngine,
 )
-from . import project_docs, quiet_hours, updater
+from . import project_docs, quiet_hours, run_report, updater
 from .project_scaffold import new_claude_project, update_claude_md_template
 from .prompt_source import DEFAULT_QUEUE_SOURCE
 from .queue_manager import QueueManager
@@ -613,7 +613,13 @@ def execute(
             asyncio.run(engine.run_with_auto_resume(poll_interval=poll_interval))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted. Unexecuted prompts remain in the queue.[/yellow]")
+        engine.record_stop(run_report.REASON_INTERRUPTED)
         raise typer.Exit(code=130)
+    except Exception as exc:  # noqa: BLE001 — record it, then let it surface as usual
+        # A crash is the case where "why did it stop" is hardest to answer
+        # later and most worth having written down.
+        engine.record_stop(run_report.REASON_CRASHED, f"{type(exc).__name__}: {exc}")
+        raise
 
 
 def _print_auth_notice(client: ClaudeClient) -> None:
@@ -637,6 +643,33 @@ def _print_auth_notice(client: ClaudeClient) -> None:
         console.print(
             f"[yellow]⚠ claude is authenticated via {status.get('authMethod', 'unknown')}, "
             "not a claude.ai subscription — this run may bill API credits.[/yellow]"
+        )
+
+
+@app.command()
+def why() -> None:
+    """Explain why the last `sandglass execute` stopped (or what it's doing now).
+
+    A queue run is unattended by design, so the moment it stops is almost never
+    a moment anyone is watching. This reads the record the run leaves behind, so
+    the answer survives the terminal scrolling, closing, or the machine sleeping.
+    """
+    storage = StorageService()
+    report = run_report.load(storage)
+    if report is None:
+        console.print(
+            "[dim]No run recorded yet in this project. Run `sandglass execute` "
+            "first — every run writes its own state to "
+            f"{storage.last_run_path}.[/dim]"
+        )
+        return
+    for line in run_report.render(report):
+        console.print(line)
+    if report.prompt_id:
+        console.print(
+            f"  [dim]Last prompt: {report.prompt_id} · {report.completed} done "
+            f"this run · {report.total_tokens:,} tokens · "
+            f"${report.total_cost_usd:.2f}[/dim]"
         )
 
 

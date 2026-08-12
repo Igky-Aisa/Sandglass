@@ -19,7 +19,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from . import notify, project_docs, prompt_source, workspace
+from . import notify, project_docs, prompt_source, run_report, workspace
 from .claude_client import ClaudeClient, QuotaExceededError
 from .models import ExecutionResult, PromptObject, Response
 from .queue_manager import QueueManager
@@ -340,12 +340,27 @@ class ExecutionEngine:
         total_cache_creation = 0
         failed = 0
         stopped_reason: str | None = None
+        stopped_detail = ""
         resume_at: str | None = None
         start = time.monotonic()
         logger.info("Starting queue execution (%d prompt(s))", total)
 
+        # Written before any work and updated per prompt, so that a run killed
+        # from outside -- closed terminal, sleeping laptop -- still leaves
+        # behind what it was doing. See sandglass/run_report.py.
+        report = run_report.RunReport(remaining=total)
+        run_report.save(self.storage, report)
+
         for i, prompt in enumerate(prompts):
             console.print(f"[bold][{i + 1}/{total}][/bold] {prompt.title}")
+            report.status = run_report.STATUS_RUNNING
+            report.prompt_id = prompt.id
+            report.prompt_title = prompt.title
+            report.completed = len(results)
+            report.remaining = total - i
+            report.total_tokens = total_tokens
+            report.total_cost_usd = total_cost
+            run_report.save(self.storage, report)
             work_log_before = self._work_log_snapshot()
             # Only measured for markdown-sourced prompts: the cut is the only
             # irreversible step, and `queue add` prompts have no block to cut.
@@ -364,6 +379,7 @@ class ExecutionEngine:
             except QuotaExceededError as exc:
                 failed += 1
                 stopped_reason = "quota"
+                stopped_detail = str(exc)
                 resume_at = _epoch_to_iso(exc.resets_at)
                 logger.error("Quota hit on prompt %s: %s", prompt.id, exc)
                 console.print("  [red]✖ Quota limit reached.[/red]")
@@ -389,6 +405,7 @@ class ExecutionEngine:
             except Exception as exc:  # noqa: BLE001 — surface any API/network error gracefully
                 failed += 1
                 stopped_reason = "error"
+                stopped_detail = str(exc)
                 logger.error("Prompt %s failed: %s", prompt.id, exc)
                 console.print(f"  [red]✖ Failed: {exc}[/red]")
                 console.print(
@@ -410,6 +427,11 @@ class ExecutionEngine:
                 if not workspace.produced_work_product(workspace_before, workspace_after):
                     failed += 1
                     stopped_reason = "no_artifact"
+                    stopped_detail = (
+                        f"{prompt.title} responded but changed no file in the "
+                        f"working tree, so its block was not cut from "
+                        f"{prompt.origin_file}."
+                    )
                     logger.error(
                         "Prompt %s returned a response but changed nothing on disk; "
                         "refusing to cut it from %s",
@@ -481,7 +503,23 @@ class ExecutionEngine:
             stopped_reason=stopped_reason,
             resume_at=resume_at,
         )
+        report.status = (
+            run_report.STATUS_STOPPED if stopped_reason else run_report.STATUS_COMPLETE
+        )
+        report.reason = stopped_reason or run_report.REASON_COMPLETE
+        report.detail = stopped_detail
+        report.completed = len(results)
+        report.remaining = len(self.queue_manager.load_queue())
+        report.total_tokens = total_tokens
+        report.total_cost_usd = total_cost
+        report.resume_at = resume_at
+        report.ended_at = run_report.now_iso()
+        run_report.save(self.storage, report)
+
         self._print_summary(result, elapsed, stopped_reason)
+        console.print()
+        for line in run_report.render(report):
+            console.print(line)
         return result
 
     async def run_with_auto_resume(
@@ -537,9 +575,15 @@ class ExecutionEngine:
                         priority="high",
                     )
                 else:
+                    # Carry the actual reason to the phone. "Stopped after an
+                    # error" tells you to go and look; the error itself often
+                    # tells you whether you need to.
+                    saved = run_report.load(self.storage)
+                    why = f" {saved.detail.splitlines()[0]}" if saved and saved.detail else ""
                     notify.send(
-                        f"Stopped after a non-quota error. {last_result.completed} prompt(s) "
-                        f"executed, {len(remaining)} still queued for a later run.",
+                        f"Stopped after a non-quota error.{why} "
+                        f"{last_result.completed} prompt(s) executed, "
+                        f"{len(remaining)} still queued for a later run.",
                         title="Sandglass: batch stopped early",
                         priority="high",
                     )
@@ -561,11 +605,26 @@ class ExecutionEngine:
                     title="Sandglass: batch stopped early",
                     priority="high",
                 )
+                self.record_stop(
+                    run_report.REASON_STALLED,
+                    f"Prompt {remaining[0].id} hit the same quota-looking error "
+                    f"{stalls} times in a row without progress.",
+                )
                 return last_result
 
             # No notification here: execute_queue already sent "token limits
             # hit" the moment the quota was detected, a second ago. Two pushes
             # for one event is just noise on the phone.
+            # A quota wait can run for hours, and "why is nothing happening"
+            # is a fair question to ask in the middle of one -- so the record
+            # says *waiting*, not *stopped*, for as long as that is true.
+            waiting = run_report.load(self.storage)
+            if waiting is not None:
+                waiting.status = run_report.STATUS_WAITING
+                waiting.pid = os.getpid()
+                waiting.ended_at = None
+                run_report.save(self.storage, waiting)
+
             wait_seconds = self._compute_wait_seconds(last_result.resume_at, poll_interval)
             try:
                 await self._sleep_with_animation(wait_seconds, last_result.resume_at)
@@ -575,6 +634,24 @@ class ExecutionEngine:
                 f"Quota refreshed -- resuming with {len(remaining)} prompt(s) still queued.",
                 title="Sandglass: resuming",
             )
+
+    def record_stop(self, reason: str, detail: str = "") -> None:
+        """Close the run record with a reason only the caller can know.
+
+        Ctrl-C and an escaping exception both end the process without
+        `execute_queue` reaching its own ending, so the CLI closes the record
+        on their behalf -- otherwise the most common way a run ends leaves the
+        least informative record.
+        """
+        report = run_report.load(self.storage) or run_report.RunReport()
+        report.status = run_report.STATUS_STOPPED
+        report.reason = reason
+        report.detail = detail or report.detail
+        report.remaining = len(self.queue_manager.load_queue())
+        report.ended_at = run_report.now_iso()
+        run_report.save(self.storage, report)
+        for line in run_report.render(report):
+            console.print(line)
 
     @staticmethod
     def _compute_wait_seconds(resume_at_iso: str | None, fallback: float) -> float:
