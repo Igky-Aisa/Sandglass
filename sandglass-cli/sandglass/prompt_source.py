@@ -151,6 +151,46 @@ def already_executed(source_file: str, prompt_text: str) -> bool:
     return _has_heading(history_path_for(source_file), identity)
 
 
+def cut_block(file_path: str, prompt_text: str) -> str | None:
+    """Remove the block matching ``prompt_text``, returning its text.
+
+    `cut_first_block` assumes the block being completed is the one at the top
+    of the file, which holds only while the queue is drained strictly in order
+    and nothing is ever left behind. The moment a block is skipped or left in
+    place, "first" and "the one that just ran" are different blocks — and
+    cutting the wrong one destroys the only copy of unbuilt work.
+
+    Matches on the block's heading identity first, then on exact text. Returns
+    ``None`` and cuts **nothing** when neither matches: re-running a block is
+    recoverable, deleting the wrong one is not.
+    """
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "r", encoding="utf-8") as fh:
+        raw = fh.read()
+    blocks = parse_blocks(raw)
+    if not blocks:
+        return None
+
+    identity = block_identity(prompt_text)
+    target = None
+    if identity:
+        target = next(
+            (b for b in blocks if block_identity(b["text"]) == identity), None
+        )
+    if target is None:
+        wanted = prompt_text.strip()
+        target = next((b for b in blocks if b["text"].strip() == wanted), None)
+    if target is None:
+        return None
+
+    new_raw = raw[: target["start"]] + raw[target["end"] :]
+    new_raw = re.sub(r"\n{3,}", "\n\n", new_raw)
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write(new_raw)
+    return target["text"]
+
+
 def history_path_for(source_file: str) -> str:
     """The sibling history file a source file's completed blocks get archived to."""
     return os.path.join(os.path.dirname(source_file) or ".", "prompt_history.md")

@@ -45,6 +45,7 @@ REASON_STALLED = "stalled"
 REASON_INTERRUPTED = "interrupted"
 REASON_CRASHED = "crashed"
 REASON_COMPLETE = "complete"
+REASON_LEFT_IN_PLACE = "left_in_place"
 # Not written by anyone: inferred when a `running` report's process is gone.
 REASON_VANISHED = "vanished"
 
@@ -244,6 +245,16 @@ def explain(report: RunReport) -> tuple[str, str, str]:
             f"An unexpected error escaped while running {where}. This is a bug in "
             f"Sandglass, not in the prompt. {queued}",
             "Report the traceback below; the queue is intact, so re-running is safe.",
+        )
+    if reason == REASON_LEFT_IN_PLACE:
+        return (
+            "Ran out of blocks it could finish",
+            f"Every remaining block reported that it needed no file change — "
+            f"already done, or nothing to write. None of them were cut, because "
+            f"nothing verifiable happened and a block's own word is not evidence. "
+            f"{queued}",
+            "Read the saved responses; if you agree the work is done, cut those "
+            "blocks from the queue file yourself. They will otherwise be retried.",
         )
     if reason == REASON_COMPLETE:
         return (

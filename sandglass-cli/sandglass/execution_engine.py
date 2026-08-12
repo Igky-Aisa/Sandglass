@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -74,10 +75,45 @@ SESSION_MODE_PROMPT = "prompt"    # one session per prompt; retries resume, bloc
 SESSION_MODE_ISOLATE = "isolate"  # no persisted session at all (pre-0.10 behaviour)
 SESSION_MODES = (SESSION_MODE_CHAIN, SESSION_MODE_PROMPT, SESSION_MODE_ISOLATE)
 
-# A chained session is rejoined only while it's plausibly still the same piece
-# of work. A queue picked up days later should start clean: the conversation
-# would be stale, its cache long expired, and its context pure overhead.
-CHAIN_MAX_AGE_SECONDS = 24 * 60 * 60
+# How long a chained session may sit IDLE and still be worth rejoining.
+#
+# Tied to the prompt cache's lifetime (1h at the longest), because that is what
+# decides the economics. Resume inside it and the whole conversation is a cache
+# *read* at ~0.1x. Resume after it has expired and the same conversation is a
+# cache *write* at 1.25-2x -- and it is the accumulated conversation, which
+# grows with every block, whereas a cold start's prefix does not. Measured on a
+# real run: resuming a session hours old billed 741k cache-write tokens ($4.92)
+# to produce 1,908 tokens of output. A cold start would have cost a fraction.
+#
+# Measured from LAST USE, not from when the chain opened: a queue that has been
+# working steadily for eight hours has a hot cache and should stay on it. It is
+# the gap that makes a session cold, not its age.
+CHAIN_MAX_AGE_SECONDS = 60 * 60
+
+# What to do when a block returns a response but changes no file.
+ON_REFUSAL_STOP = "stop"  # stop the run and let a human look (pre-0.11 behaviour)
+ON_REFUSAL_ASK = "ask"    # ask the run itself what happened, then decide
+ON_REFUSAL_MODES = (ON_REFUSAL_ASK, ON_REFUSAL_STOP)
+
+# One cheap follow-up turn in the session that just refused. It is a question,
+# never an instruction to try again: the response already explains itself in
+# prose, and prose is exactly what an automated decision cannot act on. Three
+# words, because three different situations look identical from outside and
+# want opposite responses -- and the run that just refused is the only party
+# that already knows which one it is.
+REFUSAL_QUERY = (
+    "---\n"
+    "Sandglass here, not a new task. Your last response changed no file in the "
+    "working tree, so the block was NOT cut from the queue file.\n\n"
+    "Answer in this exact shape, nothing else:\n"
+    "  VERDICT: DONE | BLOCKED | NOOP\n"
+    "  WHY: <one line>\n\n"
+    "  DONE    — the work was already complete before you started.\n"
+    "  BLOCKED — you could not do it; name precisely what is missing.\n"
+    "  NOOP    — you did the task and it genuinely required no file changes.\n"
+)
+_VERDICT_RE = re.compile(r"VERDICT:\s*(DONE|BLOCKED|NOOP)", re.IGNORECASE)
+_WHY_RE = re.compile(r"WHY:\s*(.+)", re.IGNORECASE)
 
 # Prepended to every block after the first in a chained session. Without it the
 # model reads a new block as a continuation of the last one and keeps working
@@ -300,6 +336,7 @@ class ExecutionEngine:
         session_mode: str = SESSION_MODE_CHAIN,
         brief: bool = True,
         skip_executed: bool = True,
+        on_refusal: str = ON_REFUSAL_ASK,
     ):
         self.queue_manager = queue_manager
         self.claude_client = claude_client
@@ -321,6 +358,13 @@ class ExecutionEngine:
         # Drop queued blocks that some other runner already executed and cut.
         # See prompt_source.already_executed for what counts as evidence.
         self.skip_executed = skip_executed
+        if on_refusal not in ON_REFUSAL_MODES:
+            raise ValueError(
+                f"on_refusal must be one of {', '.join(ON_REFUSAL_MODES)}, got {on_refusal!r}"
+            )
+        # Whether a block that changed no file gets asked what happened before
+        # the run gives up on the whole queue. See _ask_why_nothing_changed.
+        self.on_refusal = on_refusal
 
     # --- Public API -------------------------------------------------------
 
@@ -344,6 +388,11 @@ class ExecutionEngine:
         total_cache_creation = 0
         failed = 0
         skipped = 0
+        # Blocks the run reported as needing no file changes. They stay in the
+        # queue and in their source file, so `front_offset` keeps the front-of-
+        # queue removals below pointing at the right entry.
+        left_in_place: list[tuple[PromptObject, str, str]] = []
+        front_offset = 0
         stopped_reason: str | None = None
         stopped_detail = ""
         resume_at: str | None = None
@@ -387,7 +436,7 @@ class ExecutionEngine:
                     prompt.id, prompt.origin_file,
                 )
                 skipped += 1
-                self.queue_manager.remove_prompt(1)
+                self.queue_manager.remove_prompt(front_offset + 1)
                 continue
 
             work_log_before = self._work_log_snapshot()
@@ -454,6 +503,35 @@ class ExecutionEngine:
                     cwd=os.path.dirname(os.path.abspath(prompt.origin_file)) or None
                 )
                 if not workspace.produced_work_product(workspace_before, workspace_after):
+                    console.print(
+                        "  [red]✖ No work product: the response changed no file "
+                        "in the working tree.[/red]"
+                    )
+                    verdict, why = await self._ask_why_nothing_changed(prompt)
+
+                    # DONE and NOOP both mean "there was nothing to write here",
+                    # so the queue can keep moving. The block is still NOT cut:
+                    # cutting destroys the only copy of its text, and a model's
+                    # word is not evidence -- that is exactly the mistake the
+                    # artifact gate exists to prevent. It stays in the source
+                    # file and in the queue for a human to confirm, and the run
+                    # carries on with the blocks behind it.
+                    if verdict in ("DONE", "NOOP"):
+                        console.print(
+                            f"  [yellow]↷ Left in place ({verdict}): {why}[/yellow]"
+                        )
+                        console.print(
+                            f"  [dim]Not cut from {prompt.origin_file} — nothing "
+                            "verifiable happened. Continuing with the next block.[/dim]"
+                        )
+                        logger.info(
+                            "Prompt %s self-reported %s (%s); leaving it in place "
+                            "and continuing", prompt.id, verdict, why,
+                        )
+                        left_in_place.append((prompt, verdict, why))
+                        front_offset += 1
+                        continue
+
                     failed += 1
                     stopped_reason = "no_artifact"
                     stopped_detail = (
@@ -461,15 +539,15 @@ class ExecutionEngine:
                         f"working tree, so its block was not cut from "
                         f"{prompt.origin_file}."
                     )
+                    if verdict == "BLOCKED":
+                        stopped_detail += f" It reports: {why}"
                     logger.error(
                         "Prompt %s returned a response but changed nothing on disk; "
                         "refusing to cut it from %s",
                         prompt.id, prompt.origin_file,
                     )
-                    console.print(
-                        "  [red]✖ No work product: the response changed no file "
-                        "in the working tree.[/red]"
-                    )
+                    if verdict == "BLOCKED":
+                        console.print(f"  [red]It reports: {why}[/red]")
                     console.print(
                         f"  [yellow]Not cutting this block from {prompt.origin_file}. "
                         f"The response is saved in "
@@ -484,7 +562,8 @@ class ExecutionEngine:
                     still_queued = total - i
                     notify.send(
                         f"'{prompt.title}' returned a response but changed no files. "
-                        f"Not cut. {still_queued} prompt(s) still queued.",
+                        + (f"It reports: {why} " if why else "")
+                        + f"Not cut. {still_queued} prompt(s) still queued.",
                         title="Sandglass: no work product",
                     )
                     break
@@ -501,9 +580,20 @@ class ExecutionEngine:
                 # the project's "every task" mandate still holds.
                 self._append_work_log_entry(prompt, response)
             # Durably drop this prompt from the front of the persisted queue.
-            self.queue_manager.remove_prompt(1)
+            self.queue_manager.remove_prompt(front_offset + 1)
             if prompt.origin_file:
                 self._cut_from_source(prompt, response)
+
+        # Blocks left in place are still queued, so this run did not finish the
+        # queue however smoothly it ran. Saying "complete" here would be the
+        # kind of cheerful lie that sends someone looking for work that isn't
+        # there -- and `run_with_auto_resume` would otherwise keep re-running
+        # blocks that already said they had nothing to do.
+        if stopped_reason is None and left_in_place:
+            stopped_reason = run_report.REASON_LEFT_IN_PLACE
+            stopped_detail = "; ".join(
+                f"{p.id}: {verdict} — {why}" for p, verdict, why in left_in_place
+            )
 
         # The drain is over — end the chain so the next `sandglass execute`
         # opens a fresh conversation rather than appending unrelated work to
@@ -547,6 +637,21 @@ class ExecutionEngine:
         run_report.save(self.storage, report)
 
         self._print_summary(result, elapsed, stopped_reason)
+        if left_in_place:
+            # Named individually: each one is a block still sitting in the queue
+            # and in the source file, waiting for a human to agree it was really
+            # nothing to do. A count alone would be too easy to skim past.
+            console.print()
+            console.print(
+                f"[yellow]{len(left_in_place)} block(s) left in place — reported "
+                "as needing no file change, so NOT cut:[/yellow]"
+            )
+            for skipped_prompt, verdict, why in left_in_place:
+                console.print(f"  [yellow]· {skipped_prompt.id} ({verdict}): {why}[/yellow]")
+            console.print(
+                "  [dim]They stay queued. Cut them yourself if you agree, or re-run "
+                "with --no-require-artifact if the whole queue is read-only.[/dim]"
+            )
         console.print()
         for line in run_report.render(report):
             console.print(line)
@@ -596,7 +701,14 @@ class ExecutionEngine:
                 # "no_artifact" gets its own wording: it is not an error in the usual
                 # sense (nothing crashed), and describing it as one sends the reader
                 # hunting for a stack trace instead of reading the response.
-                if last_result.stopped_reason == "no_artifact":
+                if last_result.stopped_reason == run_report.REASON_LEFT_IN_PLACE:
+                    notify.send(
+                        f"{len(remaining)} block(s) reported they needed no file "
+                        "change, so none were cut. Read them and cut by hand if "
+                        "you agree.",
+                        title="Sandglass: nothing left to build",
+                    )
+                elif last_result.stopped_reason == "no_artifact":
                     notify.send(
                         f"Stopped: a prompt returned a response but changed no files, so "
                         f"its block was NOT cut. {last_result.completed} prompt(s) executed, "
@@ -664,6 +776,53 @@ class ExecutionEngine:
                 f"Quota refreshed -- resuming with {len(remaining)} prompt(s) still queued.",
                 title="Sandglass: resuming",
             )
+
+    async def _ask_why_nothing_changed(
+        self, prompt: PromptObject
+    ) -> tuple[str | None, str]:
+        """Ask the run that just wrote nothing which of three things happened.
+
+        Returns ``(verdict, why)`` with verdict in DONE/BLOCKED/NOOP, or
+        ``(None, "")`` when it wasn't asked or didn't answer usefully.
+
+        One short turn in the session that just refused, so it is a cache read
+        of a context that is already warm — cents, against the price of a whole
+        block. Deliberately a *question*, not "try again": the failure modes
+        want opposite responses, and only the run itself already knows which
+        one it hit.
+
+        Any doubt resolves to ``None``, which stops the run. The optimistic
+        branch (keep going) must be earned by an unambiguous answer.
+        """
+        if self.on_refusal != ON_REFUSAL_ASK or not prompt.origin_file:
+            return None, ""
+
+        session_id, persist = self._resolve_session(prompt)
+        if not session_id:
+            # Nothing to resume: the question would land in a fresh session with
+            # no memory of the refusal, so it could only guess. Don't pay for that.
+            return None, ""
+
+        console.print("  [dim]Asking why nothing changed…[/dim]")
+        try:
+            reply = await self.claude_client.send_prompt(
+                REFUSAL_QUERY,
+                model=prompt.model,
+                effort="low",
+                resume_session_id=session_id,
+                persist_session=persist,
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed question must not mask the refusal
+            logger.warning("Could not ask prompt %s why nothing changed: %s", prompt.id, exc)
+            return None, ""
+
+        match = _VERDICT_RE.search(reply.text or "")
+        if not match:
+            logger.info("Prompt %s gave no parseable verdict; stopping", prompt.id)
+            return None, ""
+        why_match = _WHY_RE.search(reply.text or "")
+        why = why_match.group(1).strip() if why_match else ""
+        return match.group(1).upper(), why
 
     def record_stop(self, reason: str, detail: str = "") -> None:
         """Close the run record with a reason only the caller can know.
@@ -856,13 +1015,16 @@ class ExecutionEngine:
         if not isinstance(state, dict):
             return None
         session_id = state.get("session_id")
-        started_at = state.get("started_at")
-        if not session_id or not started_at:
+        # `last_used_at` is the one that matters; `started_at` is the fallback
+        # for state written before it existed.
+        touched_at = state.get("last_used_at") or state.get("started_at")
+        if not session_id or not touched_at:
             return None
-        age = time.time() - float(started_at)
+        age = time.time() - float(touched_at)
         if age > CHAIN_MAX_AGE_SECONDS:
             logger.info(
-                "Chained session %s is %.1fh old; starting a fresh one.",
+                "Chained session %s has been idle %.1fh; its cache has expired, "
+                "so a cold start is cheaper than resuming it.",
                 session_id, age / 3600,
             )
             self._clear_run_state()
@@ -883,11 +1045,18 @@ class ExecutionEngine:
             return
         if self.session_mode != SESSION_MODE_CHAIN:
             return
+        now = time.time()
         state = self.storage.load_json(self.storage.run_state_path)
         if isinstance(state, dict) and state.get("session_id") == session_id:
+            # Same conversation, used again: refresh the clock. Without this the
+            # timestamp is frozen at the moment the chain opened, so a batch that
+            # works steadily for hours would abandon a perfectly warm session,
+            # while an overnight gap on a young chain would rejoin a cold one.
+            state["last_used_at"] = now
+            self._save_run_state(state)
             return
         self._save_run_state(
-            {"session_id": session_id, "started_at": time.time()}
+            {"session_id": session_id, "started_at": now, "last_used_at": now}
         )
 
     def _save_run_state(self, state: dict) -> None:
@@ -1001,11 +1170,16 @@ class ExecutionEngine:
         — prompts added directly via `queue add` never touch this.
         """
         try:
-            cut_text = prompt_source.cut_first_block(prompt.origin_file)
+            # Cut the block that just ran, identified by its own heading -- not
+            # whichever block happens to sit at the top of the file. Those are
+            # the same block only while nothing is ever skipped or left behind,
+            # and cutting the wrong one destroys unbuilt work.
+            cut_text = prompt_source.cut_block(prompt.origin_file, prompt.text)
             if cut_text is None:
                 logger.warning(
-                    "Expected a block to cut from %s for prompt %s, found none",
-                    prompt.origin_file, prompt.id,
+                    "No block matching prompt %s found in %s; cutting nothing "
+                    "(re-running a block is recoverable, cutting the wrong one is not)",
+                    prompt.id, prompt.origin_file,
                 )
                 return
             history_path = prompt_source.history_path_for(prompt.origin_file)

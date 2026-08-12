@@ -162,21 +162,42 @@ def test_a_finished_drain_starts_the_next_one_clean(qm):
     assert client2.calls[0]["resume_session_id"] is None
 
 
-def test_a_stale_chain_is_not_rejoined(qm, monkeypatch):
+def _age_chain(qm, seconds: float, field: str = "last_used_at") -> None:
+    state = qm.storage.load_json(qm.storage.run_state_path)
+    state[field] -= seconds
+    qm.storage.save_json(qm.storage.run_state_path, state)
+
+
+def test_a_chain_left_idle_past_the_cache_lifetime_is_not_rejoined(qm):
+    """Resuming after the cache expires re-writes the whole accumulated
+    conversation at 1.25-2x — and it only grows. A cold start is bounded."""
     qm.add_prompt("task one")
     qm.add_prompt("task two")
-    client = _RecordingClient(fail_on="two")
-    asyncio.run(_engine(qm, client).execute_queue())
+    asyncio.run(_engine(qm, _RecordingClient(fail_on="two")).execute_queue())
 
-    # Age the stored session past the cutoff.
-    state = qm.storage.load_json(qm.storage.run_state_path)
-    state["started_at"] -= 60 * 60 * 48
-    qm.storage.save_json(qm.storage.run_state_path, state)
+    _age_chain(qm, 60 * 60 * 48)
 
     client2 = _RecordingClient()
     asyncio.run(_engine(qm, client2).execute_queue())
 
     assert client2.calls[0]["resume_session_id"] is None
+
+
+def test_a_long_batch_that_keeps_working_keeps_its_warm_session(qm):
+    """Age is measured from last use, not from when the chain opened. An
+    earlier version froze the clock at the chain's first block, so an
+    eight-hour batch would throw away a session it had used seconds ago."""
+    qm.add_prompt("task one")
+    qm.add_prompt("task two")
+    asyncio.run(_engine(qm, _RecordingClient(fail_on="two")).execute_queue())
+
+    # Opened long ago, but used moments ago -- the cache is hot.
+    _age_chain(qm, 60 * 60 * 8, field="started_at")
+
+    client2 = _RecordingClient()
+    asyncio.run(_engine(qm, client2).execute_queue())
+
+    assert client2.calls[0]["resume_session_id"] == "sess-1"
 
 
 # --- per-block opt-out -------------------------------------------------------

@@ -162,3 +162,160 @@
 ### 3. Next Steps (For the next agent)
 - **Chained-session staleness is expensive.** Block 048 resumed a session hours old and paid 741k of cache *write* for 1,908 output tokens. `CHAIN_MAX_AGE_SECONDS` is 24h but the cache TTL is minutes; a resume past the TTL re-writes the entire accumulated context at 1.25-2x. Consider lowering it to ~1h so a cold start (cheap, bounded) beats a stale resume (unbounded, grows with the conversation).
 - Genuine dependency refusals still stop the run. A bounded "classify then act" recovery is designed but unbuilt — see the chat for the DONE/BLOCKED/NOOP shape.
+
+## 2026-08-12 - Opus 5 - Refusals no longer end the batch; stale chains no longer cost a fortune
+
+### 1. Context Snapshot
+- **Goal**: Two fixes the last live run demanded — a no-artifact block killing a 31-block queue, and a resumed session billing $4.92 for one minute of work.
+- **State**: `execution_engine.py` (`_ask_why_nothing_changed`, `CHAIN_MAX_AGE_SECONDS`), `prompt_source.py` (`cut_block`), `run_report.py`, `cli.py`.
+- **Previous Blocker**: Resolved — the already-executed block 048 is now dropped pre-flight.
+
+### 2. Work Done
+- **`--on-refusal ask` (default): one cheap turn, then decide.** DONE/NOOP keep the queue moving, BLOCKED stops with the cause named. It is a *question*, never "try again": the three cases want opposite responses and only the run knows which it hit. Unparseable answers stop — continuing is the optimistic branch and has to be earned.
+- **A self-report never authorizes a cut.** Left-in-place blocks stay in the queue AND the source file; the run ends `left_in_place`, not `complete`, listing each one. Trusting prose here is precisely the mistake that once destroyed twelve blocks.
+- **`cut_block` replaces `cut_first_block` at the call site.** Once a block can be left behind, "first in the file" and "the one that just ran" diverge, and cutting the wrong one destroys unbuilt work. Matches on heading identity; cuts nothing when unsure.
+- **Chain staleness was two bugs.** The 24h cutoff ignored the cache's 1h lifetime (a stale resume re-writes the whole accumulated conversation at 1.25-2x — the measured $4.92), and the timestamp was frozen at chain open, so age meant "time since the chain started" rather than idle time. Now 1h from last use.
+
+### 3. Next Steps (For the next agent)
+- **Nobody has watched `--on-refusal ask` decide on a real refusal yet.** Watch the first one: if a block talks itself into NOOP when it was really BLOCKED, the queue advances past a missing dependency. `--on-refusal stop` is the fallback.
+- Per-block cost across a chain is still unexplained (045 $7.40 → 047 $17.90 with cache_read tracking the same curve). The 1h cutoff addresses stale *resumes*, not growth *within* a warm chain.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - second
+
+### 1. Context Snapshot
+- **Goal**: second
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: second
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - First prompt
+
+### 1. Context Snapshot
+- **Goal**: First prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: First prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - Second prompt
+
+### 1. Context Snapshot
+- **Goal**: Second prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: Second prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - a manually added prompt
+
+### 1. Context Snapshot
+- **Goal**: a manually added prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: a manually added prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - second
+
+### 1. Context Snapshot
+- **Goal**: second
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: second
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-12 - sandglass execute (claude-opus-4-8) - second
+
+### 1. Context Snapshot
+- **Goal**: second
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: second
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.

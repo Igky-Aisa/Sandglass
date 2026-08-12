@@ -17,6 +17,7 @@ from .claude_client import DEFAULT_PERMISSION_MODE, ClaudeClient
 from .execution_engine import (
     ACCOUNTING_SCHEMA,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    ON_REFUSAL_MODES,
     SESSION_MODE_CHAIN,
     SESSION_MODES,
     ExecutionEngine,
@@ -430,6 +431,18 @@ def execute(
             "read-only prompts (reviews, questions) that legitimately write nothing."
         ),
     ),
+    on_refusal: str = typer.Option(
+        "ask",
+        "--on-refusal",
+        help=(
+            "What to do when a block responds but changes no file: 'ask' (default) "
+            "spends one cheap turn asking the run whether the work was already "
+            "DONE, is BLOCKED on something missing, or genuinely needed no file "
+            "change (NOOP) — DONE/NOOP keep the queue moving, BLOCKED stops with "
+            "the cause named. 'stop' always stops. Neither ever cuts a block on "
+            "the model's word."
+        ),
+    ),
     skip_executed: bool = typer.Option(
         True,
         "--skip-executed/--no-skip-executed",
@@ -599,6 +612,12 @@ def execute(
         )
         raise typer.Exit(code=1)
 
+    if on_refusal not in ON_REFUSAL_MODES:
+        console.print(
+            f"[red]Error: --on-refusal must be one of {', '.join(ON_REFUSAL_MODES)}.[/red]"
+        )
+        raise typer.Exit(code=1)
+
     if session_mode == SESSION_MODE_CHAIN:
         console.print(
             "[dim]Chained session: the queue runs as one warm conversation, so only "
@@ -615,6 +634,7 @@ def execute(
         qm, client,
         require_artifact=require_artifact,
         skip_executed=skip_executed,
+        on_refusal=on_refusal,
         session_mode=session_mode,
         brief=brief,
     )

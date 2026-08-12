@@ -139,6 +139,8 @@ for any single command.
 | `sandglass execute --effort LEVEL` | Default reasoning depth for prompts that don't set their own |
 | `sandglass execute --budget-usd N` | Hard per-prompt spend cap (`claude --max-budget-usd`) |
 | `sandglass execute --no-tiers` | Ignore `TIER:` markers in block text |
+| `sandglass execute --on-refusal MODE` | `ask` (default) asks a block that wrote nothing whether it was DONE / BLOCKED / NOOP, and keeps going unless blocked; `stop` always stops |
+| `sandglass execute --no-skip-executed` | Send blocks even when they were already executed and cut by someone else |
 | `sandglass why` | Why the last run stopped — or what it's doing right now (see below) |
 | `sandglass rotate-logs [--keep N]` | Archive old `work_log.md` / `prompt_history.md` entries into `master_plan/archive/` |
 | `sandglass update [--check]` | Update Sandglass itself from the git repo (see Updating below) |
