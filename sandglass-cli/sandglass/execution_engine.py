@@ -21,6 +21,7 @@ from rich.progress import (
 from rich.text import Text
 
 from . import notify, project_docs, prompt_source, run_report, workspace
+from .accounts import AccountPool
 from .claude_client import ClaudeClient, QuotaExceededError
 from .models import ExecutionResult, PromptObject, Response
 from .queue_manager import QueueManager
@@ -337,10 +338,24 @@ class ExecutionEngine:
         brief: bool = True,
         skip_executed: bool = True,
         on_refusal: str = ON_REFUSAL_ASK,
+        account_pool: "AccountPool | None" = None,
     ):
         self.queue_manager = queue_manager
         self.claude_client = claude_client
         self.storage = storage or queue_manager.storage
+        # Several subscriptions the run may draw on, one at a time. None means
+        # single-account mode: a quota hit waits for the window to refresh,
+        # exactly as it did before rotation existed. See accounts.py.
+        self.account_pool = account_pool
+        if account_pool is not None:
+            # Re-apply what an earlier run learned before choosing a starting
+            # account, so a restart doesn't spend a block rediscovering that
+            # account one is still spent. load_state() advances past any
+            # account that is still inside its window.
+            account_pool.state_path = self.storage.accounts_state_path
+            account_pool.load_state()
+            if account_pool.current is not None:
+                self.claude_client.auth_token = account_pool.current.token
         # Refuse to cut a markdown block out of its source file when the prompt
         # changed nothing on disk. See sandglass/workspace.py for why this exists
         # and what it cost to learn. Only meaningful for markdown-sourced prompts;
@@ -389,10 +404,8 @@ class ExecutionEngine:
         failed = 0
         skipped = 0
         # Blocks the run reported as needing no file changes. They stay in the
-        # queue and in their source file, so `front_offset` keeps the front-of-
-        # queue removals below pointing at the right entry.
+        # queue and in their source file for a human to confirm.
         left_in_place: list[tuple[PromptObject, str, str]] = []
-        front_offset = 0
         stopped_reason: str | None = None
         stopped_detail = ""
         resume_at: str | None = None
@@ -436,7 +449,7 @@ class ExecutionEngine:
                     prompt.id, prompt.origin_file,
                 )
                 skipped += 1
-                self.queue_manager.remove_prompt(front_offset + 1)
+                self.queue_manager.remove_prompt_entry(prompt)
                 continue
 
             work_log_before = self._work_log_snapshot()
@@ -453,12 +466,18 @@ class ExecutionEngine:
                 else None
             )
             try:
-                response = await self.execute_prompt(prompt)
+                response = await self._execute_with_rotation(prompt)
             except QuotaExceededError as exc:
                 failed += 1
                 stopped_reason = "quota"
                 stopped_detail = str(exc)
-                resume_at = _epoch_to_iso(exc.resets_at)
+                # With a pool, every account is spent by the time this is
+                # reached -- so the run resumes when the *first* of them comes
+                # back, which is rarely the one that raised.
+                pool_reset = (
+                    self.account_pool.earliest_reset() if self.account_pool else None
+                )
+                resume_at = _epoch_to_iso(pool_reset or exc.resets_at)
                 logger.error("Quota hit on prompt %s: %s", prompt.id, exc)
                 console.print("  [red]✖ Quota limit reached.[/red]")
                 if resume_at:
@@ -529,7 +548,6 @@ class ExecutionEngine:
                             "and continuing", prompt.id, verdict, why,
                         )
                         left_in_place.append((prompt, verdict, why))
-                        front_offset += 1
                         continue
 
                     failed += 1
@@ -569,6 +587,8 @@ class ExecutionEngine:
                     break
 
             results.append(response)
+            if self.account_pool is not None:
+                self.account_pool.record_usage(response.tokens_used, response.cost_usd)
             total_tokens += response.tokens_used
             total_cost += response.cost_usd
             total_cache_read += response.cache_read_tokens
@@ -579,8 +599,12 @@ class ExecutionEngine:
                 # (e.g. too small a task to bother) -- log it mechanically so
                 # the project's "every task" mandate still holds.
                 self._append_work_log_entry(prompt, response)
-            # Durably drop this prompt from the front of the persisted queue.
-            self.queue_manager.remove_prompt(front_offset + 1)
+            # Durably drop this prompt from the persisted queue. By id, not by
+            # position: the queue file sits inside the project directory that
+            # blocks write to with full tool access, so its contents can shift
+            # under a long-running block. The work is already done by here --
+            # a missing entry is bookkeeping to log, not a run to fail.
+            self.queue_manager.remove_prompt_entry(prompt)
             if prompt.origin_file:
                 self._cut_from_source(prompt, response)
 
@@ -633,6 +657,8 @@ class ExecutionEngine:
         report.total_tokens = total_tokens
         report.total_cost_usd = total_cost
         report.resume_at = resume_at
+        if self.account_pool is not None:
+            report.accounts = self.account_pool.usage_summary()
         report.ended_at = run_report.now_iso()
         run_report.save(self.storage, report)
 
@@ -772,6 +798,15 @@ class ExecutionEngine:
                 await self._sleep_with_animation(wait_seconds, last_result.resume_at)
             except asyncio.CancelledError:
                 raise
+            # The wait was sized to the first account whose window reopens, so
+            # let that one (and any other that has since refreshed) back into
+            # the rotation before the next attempt -- otherwise the pool stays
+            # marked spent forever and every later block runs single-account.
+            if self.account_pool is not None:
+                self.account_pool.clear_expired()
+                revived = self.account_pool.advance() or self.account_pool.current
+                if revived is not None:
+                    self.claude_client.auth_token = revived.token
             notify.send(
                 f"Quota refreshed -- resuming with {len(remaining)} prompt(s) still queued.",
                 title="Sandglass: resuming",
@@ -837,6 +872,8 @@ class ExecutionEngine:
         report.reason = reason
         report.detail = detail or report.detail
         report.remaining = len(self.queue_manager.load_queue())
+        if self.account_pool is not None:
+            report.accounts = self.account_pool.usage_summary()
         report.ended_at = run_report.now_iso()
         run_report.save(self.storage, report)
         for line in run_report.render(report):
@@ -880,6 +917,54 @@ class ExecutionEngine:
                 tick += 1
                 await asyncio.sleep(min(ANIMATION_TICK_SECONDS, remaining))
         console.print("[green]⌛ Resuming — retrying the queue now.[/green]")
+
+    async def _execute_with_rotation(self, prompt: PromptObject) -> Response:
+        """Run one block, moving to the next account when quota runs out.
+
+        The block is *retried*, not skipped: a quota hit interrupts work that
+        was never done, so re-sending it under the next account is the whole
+        point. Only when every account in the pool is spent does the error
+        escape to the caller, which then waits exactly as a single-account run
+        always has.
+
+        The session is deliberately left alone across a switch. Transcripts
+        are local files that `--resume` replays under any credential, so the
+        chain survives; what does not survive is the *server-side* prompt
+        cache, which is per-account and starts cold. That costs one cache
+        write on the receiving account and nothing after it.
+        """
+        while True:
+            try:
+                return await self.execute_prompt(prompt)
+            except QuotaExceededError as exc:
+                if self.account_pool is None:
+                    raise
+                spent = self.account_pool.current_name
+                self.account_pool.mark_exhausted(exc.resets_at)
+                nxt = self.account_pool.advance()
+                if nxt is None:
+                    console.print(
+                        f"  [yellow]Account '{spent}' is out of quota, and so is "
+                        "every other account in the pool.[/yellow]"
+                    )
+                    raise
+                self.claude_client.auth_token = nxt.token
+                when = (
+                    f" (back around {_local_time_str(_epoch_to_iso(exc.resets_at))})"
+                    if exc.resets_at else ""
+                )
+                console.print(
+                    f"  [yellow]↻ Account '{spent}' is out of quota{when} — "
+                    f"switching to '{nxt.name}' and retrying this block.[/yellow]"
+                )
+                logger.info(
+                    "Rotated account %s -> %s on prompt %s",
+                    spent, nxt.name, prompt.id,
+                )
+                notify.send(
+                    f"Quota spent on '{spent}'. Continuing on '{nxt.name}'.",
+                    title="Sandglass: switched account",
+                )
 
     async def execute_prompt(self, prompt: PromptObject) -> Response:
         """Send a single prompt to Claude Code with a live progress spinner."""

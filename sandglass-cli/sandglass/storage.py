@@ -36,6 +36,18 @@ class StorageService:
         return os.path.join(self.base_path, "settings.json")
 
     @property
+    def accounts_state_path(self) -> str:
+        """When each pooled account's quota is expected back.
+
+        Names and epoch timestamps only — never a token. Kept on disk for the
+        same reason `run_state_path` is: the thing it must survive is the
+        process ending. A run that restarts after a crash would otherwise see
+        a full pool, start at the first account, and spend a real request
+        rediscovering a quota it had already found.
+        """
+        return os.path.join(self.base_path, "accounts_state.json")
+
+    @property
     def run_state_path(self) -> str:
         """Which Claude Code session the current queue drain is running in.
 

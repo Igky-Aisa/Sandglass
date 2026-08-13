@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import Optional
 
 from . import prompt_source
 from .models import PromptObject
@@ -170,6 +171,40 @@ class QueueManager:
         self.save_queue(queue)
         logger.info("Removed prompt %s from queue", removed.id)
         return removed
+
+    def remove_prompt_entry(self, prompt: PromptObject) -> Optional[PromptObject]:
+        """Drop this exact prompt; return None if it is already gone.
+
+        Neither position nor id can be trusted here. `.sandglass/queue.json`
+        lives inside the project directory, which is exactly where queued
+        blocks run with full tool access, so a long block can rewrite or clear
+        the queue mid-run. Observed live: a 20-minute block emptied the queue
+        at 11:41, and the engine crashed at 11:44 popping position 1 from an
+        empty list, discarding a completed $10 block.
+
+        Ids are sequence numbers assigned on insert, not identities — clear
+        the queue and add something else and it is `001` again. Removing by id
+        alone would therefore delete an *unrelated* block that inherited the
+        number. The prompt's text is what actually identifies it, so both must
+        match.
+
+        Returns None rather than raising: by the time this is called the work
+        is done, and the entry is bookkeeping. Something else having removed
+        it first is not a reason to fail the run.
+        """
+        queue = self.load_queue()
+        for i, candidate in enumerate(queue):
+            if candidate.id == prompt.id and candidate.text == prompt.text:
+                removed = queue.pop(i)
+                self.save_queue(queue)
+                logger.info("Removed prompt %s from queue", removed.id)
+                return removed
+        logger.warning(
+            "Prompt %s (%s) was no longer in the queue when the run tried to "
+            "remove it — something else modified %s during the run.",
+            prompt.id, prompt.title[:60], self.storage.queue_path,
+        )
+        return None
 
     def clear_queue(self) -> None:
         """Empty the queue."""

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+from datetime import datetime
 from typing import Optional
 
 import typer
@@ -13,6 +14,8 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__  # noqa: E402 — UTF-8 stdout reconfig happens on package import
+from . import accounts as accounts_mod
+from .accounts import AccountPool, AccountsError
 from .claude_client import DEFAULT_PERMISSION_MODE, ClaudeClient
 from .execution_engine import (
     ACCOUNTING_SCHEMA,
@@ -443,6 +446,19 @@ def execute(
             "the model's word."
         ),
     ),
+    accounts_mode: str = typer.Option(
+        "auto",
+        "--accounts",
+        help=(
+            "How to use a pool of Claude subscriptions defined in "
+            "~/.sandglass/accounts.json (or $SANDGLASS_ACCOUNTS): 'auto' "
+            "(default) rotates to the next account when one runs out of quota, "
+            "if that file exists, and otherwise behaves exactly as before; "
+            "'rotate' requires the file and errors if it is missing; 'off' "
+            "ignores it and waits out the quota on the current login. Accounts "
+            "must be your own — sharing credentials breaks Anthropic's terms."
+        ),
+    ),
     skip_executed: bool = typer.Option(
         True,
         "--skip-executed/--no-skip-executed",
@@ -586,6 +602,18 @@ def execute(
         )
         raise typer.Exit(code=1)
 
+    # Loaded before the auth notice so that notice describes the credential
+    # the run will actually bill, not whichever account `claude` happens to be
+    # logged into on this machine.
+    pool = _load_account_pool(accounts_mode)
+    if pool is not None and pool.current is not None:
+        _verify_account_pool(pool)
+        client.auth_token = pool.current.token
+        console.print(
+            f"[dim]Starting on '{pool.current_name}'; the run moves to the next "
+            "account when a quota runs out.[/dim]"
+        )
+
     _print_auth_notice(client)
 
     if permission_mode == "bypassPermissions":
@@ -637,6 +665,7 @@ def execute(
         on_refusal=on_refusal,
         session_mode=session_mode,
         brief=brief,
+        account_pool=pool,
     )
     try:
         if once:
@@ -652,6 +681,105 @@ def execute(
         # later and most worth having written down.
         engine.record_stop(run_report.REASON_CRASHED, f"{type(exc).__name__}: {exc}")
         raise
+
+
+def _load_account_pool(mode: str) -> "AccountPool | None":
+    """Resolve `--accounts` into a pool, or None for single-account running.
+
+    'auto' is the default because it is the only setting that is correct for
+    both kinds of user: someone with no accounts file gets exactly the old
+    behaviour with nothing to configure, and someone who has written one gets
+    rotation without having to remember a flag on every run.
+    """
+    mode = (mode or "auto").lower()
+    if mode not in ("auto", "rotate", "off"):
+        console.print("[red]Error: --accounts must be one of auto, rotate, off.[/red]")
+        raise typer.Exit(code=1)
+    if mode == "off":
+        return None
+
+    try:
+        pool = AccountPool.load()
+    except AccountsError as exc:
+        # Never silently degrade to single-account: a typo in the accounts
+        # file would otherwise surface hours later as an unexplained quota
+        # wait, which is the hardest possible way to notice it.
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if pool is None:
+        if mode == "rotate":
+            console.print(
+                f"[red]Error: --accounts rotate, but no accounts file at "
+                f"{AccountPool.default_path()}.[/red]"
+            )
+            console.print(
+                '[dim]Create it as {"accounts": [{"name": "personal", "token": "..."}]} '
+                "— mint each token with [cyan]claude setup-token[/cyan].[/dim]"
+            )
+            raise typer.Exit(code=1)
+        return None
+    return pool
+
+
+def _verify_account_pool(pool: AccountPool) -> bool:
+    """Catch tokens that are obviously not tokens. Returns False if any are.
+
+    This is all that can be checked for free: `claude auth status` reports
+    `loggedIn: true` for the literal string "x", so it cannot tell a good
+    token from a garbage one and must not be used to imply otherwise. Real
+    validation costs a live request — `sandglass accounts --probe`.
+    """
+    ok = True
+    seen: dict[str, str] = {}
+    for account in pool.accounts:
+        problem = accounts_mod.looks_malformed(account.token)
+        if problem:
+            ok = False
+            console.print(
+                f"[red]✖ {account.name}: {problem}.[/red] "
+                "[dim]Re-mint with [cyan]sandglass setup-token[/cyan].[/dim]"
+            )
+            continue
+        # Same token under two names makes the pool look like it has capacity
+        # it doesn't; rotating onto a duplicate buys nothing.
+        if account.token in seen:
+            ok = False
+            console.print(
+                f"[yellow]⚠ '{seen[account.token]}' and '{account.name}' are the "
+                "same token — rotating between them gains you no quota.[/yellow]"
+            )
+        else:
+            seen[account.token] = account.name
+    return ok
+
+
+def _probe_account(client: ClaudeClient, account) -> tuple[bool, str]:
+    """Send one minimal live request under `account`'s token.
+
+    Run from an empty directory so the project's CLAUDE.md is not
+    auto-discovered — that context alone has measured ~23,000 billed tokens
+    in this repo, which would make checking three tokens cost more than the
+    work it protects.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as empty_dir:
+        try:
+            result = subprocess.run(
+                accounts_mod.probe_command(client._cli_path),
+                capture_output=True, text=True, timeout=180, check=False,
+                cwd=empty_dir,
+                env=accounts_mod.subprocess_env(account.token),
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return False, f"probe failed to run: {exc}"
+
+    if result.returncode == 0:
+        return True, (result.stdout or "").strip().splitlines()[-1][:60] if result.stdout else "ok"
+    message = (result.stderr or result.stdout or "no output").strip()
+    return False, message.splitlines()[0][:160] if message else "unknown error"
 
 
 def _print_auth_notice(client: ClaudeClient) -> None:
@@ -676,6 +804,118 @@ def _print_auth_notice(client: ClaudeClient) -> None:
             f"[yellow]⚠ claude is authenticated via {status.get('authMethod', 'unknown')}, "
             "not a claude.ai subscription — this run may bill API credits.[/yellow]"
         )
+
+
+@app.command("setup-token")
+def setup_token_cmd() -> None:
+    """Mint a long-lived subscription token for the account you're signed in as.
+
+    A passthrough to `claude setup-token` — the token is Claude Code's to
+    issue, not Sandglass's. It exists because every other step of setting up
+    an account pool is a `sandglass` command, and having exactly one of them
+    be a `claude` command is a reliable way to lose a minute.
+    """
+    client = ClaudeClient()
+    if not client.has_cli:
+        console.print("[red]Error: the 'claude' CLI was not found on PATH.[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(
+        "[dim]Running `claude setup-token` — this mints a token for whichever "
+        "account you are currently signed in as. Copy it into "
+        f"{AccountPool.default_path()}, then run [cyan]sandglass accounts[/cyan] "
+        "to check it.[/dim]"
+    )
+    # Inherit stdio: the browser handshake is interactive and the token is
+    # printed for the user to copy, so neither may be captured.
+    import subprocess
+
+    raise typer.Exit(code=subprocess.run([client._cli_path, "setup-token"]).returncode)
+
+
+@app.command()
+def accounts(
+    probe: bool = typer.Option(
+        False,
+        "--probe",
+        help=(
+            "Actually use each token, with one tiny request per account. This "
+            "is the only way to tell a working token from an expired one — "
+            "`claude auth status` reports success for any non-empty string. "
+            "Costs a few tokens per account; run it once after setup."
+        ),
+    ),
+) -> None:
+    """List the pooled Claude subscriptions and show which quota is spent.
+
+    Free by default, which also means it cannot confirm a token actually
+    works — pass --probe for that.
+    """
+    try:
+        pool = AccountPool.load()
+    except AccountsError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    path = AccountPool.default_path()
+    if pool is None:
+        console.print(f"[yellow]No accounts file at {path}.[/yellow]")
+        console.print(
+            "[dim]Mint a token per account with [cyan]claude setup-token[/cyan] and "
+            'write {"accounts": [{"name": "...", "token": "..."}]} there. Until then '
+            "runs use whichever account `claude` is logged into.[/dim]"
+        )
+        return
+
+    client = ClaudeClient()
+    if not client.has_cli:
+        console.print("[red]Error: the 'claude' CLI was not found on PATH.[/red]")
+        raise typer.Exit(code=1)
+
+    # Show recorded exhaustion alongside the identity check, so one command
+    # answers both "are these tokens good" and "which of them can run now".
+    pool.state_path = StorageService().accounts_state_path
+    pool.load_state()
+
+    console.print(f"[bold]Accounts[/bold] [dim]({path})[/dim]")
+    _verify_account_pool(pool)
+
+    for account in pool.accounts:
+        if account.is_available():
+            state = "[green]●[/green] quota available"
+        else:
+            # Local wall-clock, not an ISO string: this line answers "how long
+            # until it can run again", and 14:35 answers that at a glance.
+            back = datetime.fromtimestamp(account.exhausted_until).strftime("%H:%M")
+            state = f"[yellow]○[/yellow] spent, expected back around {back}"
+        console.print(f"  {state} — {account.name}")
+
+    if not probe:
+        console.print(
+            "\n[dim]Tokens are not verified: `claude auth status` accepts any "
+            "non-empty string, so only a live request can tell a working token "
+            "from an expired one. Run [cyan]sandglass accounts --probe[/cyan] to "
+            "check them for real (costs a few tokens per account).[/dim]"
+        )
+        return
+
+    console.print("\n[bold]Probing each token with one small request…[/bold]")
+    failures = 0
+    for account in pool.accounts:
+        ok, detail = _probe_account(client, account)
+        if ok:
+            console.print(f"  [green]✔[/green] {account.name}: works")
+        else:
+            failures += 1
+            console.print(f"  [red]✖[/red] {account.name}: {detail}")
+    if failures:
+        console.print(
+            f"\n[yellow]{failures} account(s) failed. Re-mint with "
+            "[cyan]sandglass setup-token[/cyan] while signed in as that "
+            "account, then paste the new token into the file above.[/yellow]"
+        )
+    else:
+        console.print("\n[green]All accounts working.[/green]")
 
 
 @app.command()

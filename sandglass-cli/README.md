@@ -444,6 +444,132 @@ sandglass execute              # default: waits out quota hits, auto-resumes
 sandglass execute --once       # old behavior: stop at the first failure
 ```
 
+### Several subscriptions: rotating accounts instead of waiting
+
+If you hold more than one Claude subscription, a quota hit does not have to mean
+an idle night. Give Sandglass a pool of accounts and it moves to the next one and
+**retries the same block**, only falling back to the wait above once every account
+in the pool is spent — at which point it sleeps until the *earliest* of them
+refreshes, not the last one to fail.
+
+> **These must be accounts you hold yourself.** Anthropic's Consumer Terms forbid
+> sharing account credentials or making an account available to anyone else. One
+> person with several subscriptions is fine; a pool assembled from other people's
+> logins is the thing that is not.
+
+**This is not the Anthropic API.** A `setup-token` token authenticates the same
+subscription you log into interactively — `claude auth status` reports
+`authMethod: oauth_token` with `apiProvider: firstParty`, where a plain login
+reports `authMethod: claude.ai` with the same `firstParty`. The variable that
+*would* switch you to pay-per-token billing is `ANTHROPIC_API_KEY`, and
+Sandglass strips it (along with `ANTHROPIC_AUTH_TOKEN`) from every rotated
+subprocess. How you sign in to claude.ai — Google, email, whatever — makes no
+difference; the token represents the account, not the identity provider.
+
+Mint one token per account. `setup-token` mints for whichever account you are
+currently signed in as, so it's one pass per account:
+
+```bash
+claude auth login      # sign in as account 1
+claude setup-token     # copy the token
+claude auth logout
+claude auth login      # sign in as account 2 …
+```
+
+Your day-to-day interactive login is untouched by any of this — tokens are
+injected per-subprocess, so you can keep using Claude Code by hand under one
+account while a batch runs under another.
+
+Then write them to `~/.sandglass/accounts.json`:
+
+```json
+{
+  "accounts": [
+    { "name": "personal", "token": "sk-ant-oat01-…" },
+    { "name": "work",     "token": "sk-ant-oat01-…" }
+  ]
+}
+```
+
+```bash
+chmod 600 ~/.sandglass/accounts.json    # POSIX; Sandglass warns if others can read it
+sandglass execute                       # --accounts auto (default): rotates if the file exists
+sandglass execute --accounts off        # ignore the pool, wait out the quota as before
+sandglass execute --accounts rotate     # require the pool; error if the file is missing
+```
+
+Set `SANDGLASS_ACCOUNTS` to read the file from somewhere else.
+
+Check the pool any time with `sandglass accounts`:
+
+```
+$ sandglass accounts
+Accounts (C:\Users\you\.sandglass\accounts.json)
+  ● quota available — personal
+  ○ spent, expected back around 21:17 — work
+```
+
+That much is free, and it is also the limit of what free can tell you:
+**`claude auth status` reports `loggedIn: true` for any non-empty string**, so
+nothing offline can distinguish a working token from an expired one. To check
+for real, spend one tiny request per account:
+
+```
+$ sandglass accounts --probe
+Probing each token with one small request…
+  ✔ personal: works
+  ✔ work: works
+```
+
+The probe runs from an empty directory so your `CLAUDE.md` isn't
+auto-discovered — in a large project that context alone measures ~23,000
+billed tokens, which would make checking three tokens cost more than the work
+it protects.
+
+`sandglass execute` checks the cheap things at startup — a token that is empty,
+truncated, whitespace-wrapped, or still the placeholder from these docs, and
+the same token pasted under two names (which makes the pool look bigger than
+it is). It does not claim a token is valid.
+
+The cycle, with three accounts:
+
+```
+quota hit on account-1  → switch to account-2   (account-1 back at 21:17)
+quota hit on account-2  → switch to account-3   (account-2 back at 23:41)
+quota hit on account-3  → nothing has quota     (account-3 back at 02:05)
+                        → wait until 21:17, the earliest of the three
+21:17                   → resume on account-1, keep going until it hits again
+```
+
+Each account's refresh time is written to `.sandglass/accounts_state.json`
+(names and epochs only, never a token) as it's learned, so a restarted or
+crashed run doesn't spend a block rediscovering a quota the previous process
+already found — it picks up on an account that actually has capacity. Times
+already in the past are ignored, so the file self-clears.
+
+**Keep that file outside your project directory** — the default location already
+is. Queued blocks run with `bypassPermissions` in the project tree and their
+output is persisted verbatim to `.sandglass/responses/`, so a credential stored
+*inside* the repo is one incurious `cat` away from being written into a response
+file that outlives the run. Nothing Sandglass writes — logs, run report,
+history — ever contains a token; only the account's `name`.
+
+The switch deliberately leaves your sessions alone. Transcripts are local files
+that `--resume` replays under any credential, so a chained queue keeps its
+context across a rotation. What does not carry over is Anthropic's *server-side*
+prompt cache, which is per-account: the first block under a new account pays a
+cache write instead of a cache read, and every block after it is warm again.
+That's why the rotation drains one account fully before touching the next rather
+than balancing across them.
+
+`sandglass why` reports the split when a run used more than one:
+
+```
+Accounts used:
+  · personal: 7 block(s), 412,331 tokens, $3.9812
+  · work: 5 block(s), 288,104 tokens, $2.7710
+```
+
 ### Push notifications (ntfy.sh)
 
 If you're not watching the terminal, set an [ntfy.sh](https://ntfy.sh) topic and

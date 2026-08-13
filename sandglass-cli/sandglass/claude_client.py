@@ -21,6 +21,7 @@ import shutil
 import subprocess
 from typing import Callable, Optional
 
+from .accounts import subprocess_env
 from .models import Response
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,7 @@ class ClaudeClient:
         effort: Optional[str] = None,
         budget_usd: Optional[float] = None,
         stable_prefix: bool = True,
+        auth_token: Optional[str] = None,
     ):
         self.model = model
         self.permission_mode = permission_mode
@@ -118,6 +120,11 @@ class ClaudeClient:
         self.effort = effort
         self.budget_usd = budget_usd
         self.stable_prefix = stable_prefix
+        # Which subscription to run under, when a pool of them is in play.
+        # None means "whatever `claude` itself is logged into", which is the
+        # single-account default and leaves the machine's own login untouched.
+        # Mutated in place by the engine when it rotates -- see accounts.py.
+        self.auth_token = auth_token
         self._cli_path = shutil.which("claude")
 
     @property
@@ -138,6 +145,10 @@ class ClaudeClient:
             result = subprocess.run(
                 [self._cli_path, "auth", "status"],
                 capture_output=True, text=True, timeout=20, check=False,
+                # Under rotation this reports the *pooled* account rather than
+                # the machine's own login, so the pre-flight notice describes
+                # the credential the run will actually bill.
+                env=subprocess_env(self.auth_token),
             )
             return json.loads(result.stdout)
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
@@ -231,6 +242,9 @@ class ClaudeClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=STREAM_BUFFER_LIMIT,
+            # None when not rotating -- the subprocess then inherits this
+            # process's environment exactly as it always has.
+            env=subprocess_env(self.auth_token),
         )
 
         pieces: list[str] = []

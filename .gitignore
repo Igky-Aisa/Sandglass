@@ -1,5 +1,10 @@
 # Local config / secrets -- never commit
 .env
+# Scratch files that have repeatedly held OAuth tokens in plaintext. Account
+# credentials belong in ~/.sandglass/accounts.json, outside the repo entirely.
+temp.md
+accounts.json
+*.token
 
 # Sandglass runtime data (queue/history/response cache)
 .sandglass/

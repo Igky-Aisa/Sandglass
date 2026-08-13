@@ -233,3 +233,51 @@ def test_a_tier_mentioned_deep_in_the_body_is_not_front_matter(qm):
     qm.add_prompt(text=body)
 
     assert qm.get_prompt(1).model is None
+
+
+# --- Removal by id ---------------------------------------------------------
+#
+# `.sandglass/queue.json` lives inside the project directory, which is exactly
+# where queued blocks run with full tool access. A block that rewrites or
+# clears the queue mid-run used to crash the engine on an index that no longer
+# pointed at what it thought — losing a block that had already completed.
+
+
+def test_remove_entry_takes_the_named_prompt_not_a_position(qm):
+    qm.add_prompt(text="first")
+    qm.add_prompt(text="second")
+    qm.add_prompt(text="third")
+    second = qm.get_prompt(2)
+
+    removed = qm.remove_prompt_entry(second)
+
+    assert removed is not None and removed.id == second.id
+    assert [p.text for p in qm.load_queue()] == ["first", "third"]
+
+
+def test_removing_an_already_gone_prompt_returns_none_instead_of_raising(qm):
+    """The regression: a block emptied the queue while the run was working.
+
+    Observed live — queue.json rewritten at 11:41, the engine crashed at 11:44
+    popping position 1 from an empty list, discarding a completed $10 block.
+    By the time removal happens the work is done, so a missing entry is
+    bookkeeping to log, not a run to fail.
+    """
+    qm.add_prompt(text="only")
+    prompt = qm.get_prompt(1)
+    qm.clear_queue()          # stand-in for the block clobbering the file
+
+    assert qm.remove_prompt_entry(prompt) is None
+    assert qm.load_queue() == []
+
+
+def test_removal_survives_the_queue_being_rewritten_under_it(qm):
+    qm.add_prompt(text="running block")
+    running = qm.get_prompt(1)
+    qm.clear_queue()
+    qm.add_prompt(text="something a block queued mid-run")
+
+    # The entry it meant to remove is gone, but an unrelated one has appeared.
+    # It must not delete that one just because it now sits at position 1.
+    assert qm.remove_prompt_entry(running) is None
+    assert [p.text for p in qm.load_queue()] == ["something a block queued mid-run"]

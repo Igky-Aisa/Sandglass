@@ -71,6 +71,11 @@ class RunReport:
     total_tokens: int = 0
     total_cost_usd: float = 0.0
     resume_at: Optional[str] = None
+    # Per-account totals when several subscriptions were rotated through.
+    # Names, block counts and cost only -- a token must never reach this file,
+    # which is written to `.sandglass/` inside the repo where any block with
+    # bypassPermissions could read it back. See accounts.py.
+    accounts: list[dict] = field(default_factory=list)
     started_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     ended_at: Optional[str] = None
@@ -288,6 +293,18 @@ def render(report: RunReport) -> list[str]:
         for line in report.detail.strip().splitlines():
             lines.append(f"  [dim]│[/dim] {line}")
     lines.append(f"  [bold]Next:[/bold] {todo}")
+    if report.accounts:
+        # Only rendered for rotated runs. One merged total would hide the fact
+        # that the queue crossed accounts at all, which is the thing worth
+        # knowing when reading back why a run cost what it did.
+        lines.append("  [bold]Accounts used:[/bold]")
+        for entry in report.accounts:
+            lines.append(
+                f"    [dim]·[/dim] {entry.get('name', '?')}: "
+                f"{entry.get('blocks', 0)} block(s), "
+                f"{entry.get('tokens', 0):,} tokens, "
+                f"${entry.get('cost_usd', 0.0):.4f}"
+            )
     when = report.ended_at or report.updated_at
     if when:
         lines.append(f"  [dim]Recorded {when}[/dim]")

@@ -218,6 +218,27 @@ When I say **"future prompts all"**
 
 **Relationship to `sandglass execute`:** the Sandglass CLI (`sandglass-cli/`) can also read `future_prompts.md` directly — if its queue is empty, `sandglass execute` auto-loads every `====` block from this same file and runs each one headlessly via `claude -p`, cutting completed ones into `history_prompts.md` the same way. These are two different execution paths over the same file, not duplicates of each other: saying "future prompts" to me means *I* run the top block myself, interactively, in this chat; running `sandglass execute` means it runs unattended through the CLI instead. Whichever processes a block first cuts it out, so a block is never run twice — but be intentional about which one you're asking for.
 
+> ### ⚠️ If you are running under `sandglass execute`, do NOT cut, and do NOT touch `.sandglass/`
+>
+> **How to tell:** a `<project_state>` block at the top of your prompt means you are a headless
+> block inside a queue run. Step 2 above ("cut that executed prompt out") applies **only** when a
+> human runs the block interactively in chat.
+>
+> In a queue run the runner owns the bookkeeping — it cuts the block from `future_prompts.md`,
+> archives it, and maintains `.sandglass/`. Doing any of that yourself is not a harmless
+> duplicate: the runner does it **after** your response returns, and finds the state already
+> changed underneath it.
+>
+> Real incident (2026-08-13): a block cut its own entry and cleared `.sandglass/queue.json` while
+> it was still running. The runner then crashed trying to remove a block that had just cost
+> **$10.21 and 14.1M tokens**. Separately, a block read `.sandglass/last_run.json`, saw its own
+> runner's PID marked `running`, concluded a rival process held the files, and refused to write
+> anything at all — that entry is *this* run, not a lock.
+>
+> If a task genuinely requires changing the queue, say so in your response and leave the files
+> alone.
+
+
 ## "check progress" trigger — measure against the master plan
 
 When I say **"check progress"** (or **"progress"**), report where the project

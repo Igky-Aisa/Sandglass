@@ -159,6 +159,22 @@ def build_brief(
         "costs more than the task usually does. Work from what is below. Open the "
         "full files only if you need history this brief genuinely doesn't cover, "
         "and read the tail rather than the whole file when you do.",
+        # Sandglass's own state sits inside the directory the block has full
+        # tool access to, and blocks reliably find it and reason about it. Two
+        # live incidents, both expensive: one block read `last_run.json`, saw
+        # its own runner's PID marked `running`, concluded a competing process
+        # held the files and refused to write anything; another rewrote
+        # `queue.json` mid-run, and the engine then crashed trying to remove a
+        # block that had just cost $10 to produce. Neither block was doing
+        # anything unreasonable -- the files look like project state, so they
+        # get treated as project state. Saying so is cheaper than either
+        # failure.
+        "\nThe `.sandglass/` directory is the queue runner's own bookkeeping, "
+        "not project state. Do not read it to work out what is happening, and "
+        "never write to it. In particular, a `running` entry in "
+        "`.sandglass/last_run.json` is *this* run -- it is not another process "
+        "competing with you, and it is not a lock. If a task genuinely requires "
+        "changing the queue, say so in your response and leave the files alone.",
     ]
     if progress:
         sections.append(f"\n## Status ({MASTER_PLAN_DIR}/{PROGRESS_NAME})\n\n{progress}")
