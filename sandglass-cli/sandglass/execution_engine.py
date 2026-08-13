@@ -859,7 +859,10 @@ class ExecutionEngine:
         try:
             reply = await self.claude_client.send_prompt(
                 REFUSAL_QUERY,
-                model=prompt.model,
+                # Never `prompt.model` raw: this question always goes to the
+                # Anthropic session that just refused, so a provider's model
+                # name would name something that endpoint has never heard of.
+                model=self._model_for(prompt, None),
                 effort="low",
                 resume_session_id=session_id,
                 persist_session=persist,
@@ -994,6 +997,41 @@ class ExecutionEngine:
             return None
         return provider, key
 
+    def _model_for(
+        self, prompt: PromptObject, routed: "tuple[providers.Provider, str] | None"
+    ) -> str:
+        """The model id to actually send, given where this block is going.
+
+        Routed, this resolves through the provider so `deepseek-pro` becomes
+        the id their endpoint expects.
+
+        **Not** routed, it has one job that is easy to miss: a block whose
+        model is a *provider's* model — because it said `model: deepseek-pro`,
+        or because a `CLINE:` marker set one — has just fallen back to
+        Anthropic, and forwarding that name would ask Claude for a model that
+        does not exist there. The fallback would turn a missing API key into a
+        hard failure on every marked block, which is precisely what falling
+        back was meant to avoid. So the name is dropped for the run default and
+        the substitution is said out loud, never silently.
+        """
+        if routed:
+            return routed[0].resolve_model(prompt.model)
+
+        owner = providers.provider_for_model(prompt.model)
+        if owner is None:
+            return prompt.model or self.claude_client.model
+
+        console.print(
+            f"  [yellow]'{prompt.model}' is a {owner.name} model and this block "
+            f"is running on Anthropic — using {self.claude_client.model} "
+            "instead.[/yellow]"
+        )
+        logger.info(
+            "Prompt %s asked for %s but fell back to Anthropic; substituting %s",
+            prompt.id, prompt.model, self.claude_client.model,
+        )
+        return self.claude_client.model
+
     async def _execute_with_rotation(self, prompt: PromptObject) -> Response:
         """Run one block, moving to the next account when quota runs out.
 
@@ -1055,10 +1093,7 @@ class ExecutionEngine:
     async def execute_prompt(self, prompt: PromptObject) -> Response:
         """Send a single prompt to Claude Code with a live progress spinner."""
         routed = self._resolve_provider(prompt)
-        effective_model = (
-            routed[0].resolve_model(prompt.model) if routed
-            else (prompt.model or self.claude_client.model)
-        )
+        effective_model = self._model_for(prompt, routed)
         effective_effort = prompt.effort or self.claude_client.effort
 
         resume_session_id, persist_session = self._resolve_session(prompt)
@@ -1119,7 +1154,7 @@ class ExecutionEngine:
                 response = await self.claude_client.send_prompt(
                     text,
                     on_chunk,
-                    model=prompt.model,
+                    model=effective_model,
                     effort=prompt.effort,
                     resume_session_id=resume_session_id,
                     persist_session=persist_session,

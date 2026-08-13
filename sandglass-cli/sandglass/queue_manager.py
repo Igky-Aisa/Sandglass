@@ -148,6 +148,14 @@ class QueueManager:
         # outranks a TIER marker on model choice while leaving effort alone.
         model = model or headers.get("model") or ext_model or tier_model
         effort = effort or headers.get("effort") or tier_effort
+        # Naming a vendor's model IS choosing that vendor: `model: deepseek-pro`
+        # routes on its own, with no second marker to remember. Only ever
+        # *adds* a provider, never overrides one already stated, and only fires
+        # on a vendor-prefixed name -- see providers.provider_for_model.
+        if provider is None:
+            owner = providers.provider_for_model(model)
+            if owner is not None:
+                provider = owner.name
         isolate = headers.get("isolate", "").strip().lower() in _TRUTHY
 
         queue = self.load_queue()

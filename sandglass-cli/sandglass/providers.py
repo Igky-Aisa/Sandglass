@@ -128,6 +128,11 @@ DEEPSEEK = Provider(
     tiers={
         "pro": "deepseek-v4-pro",
         "flash": "deepseek-v4-flash",
+        # The vendor-qualified spellings. These are the ones that can be
+        # written as a plain `model:` and still say which vendor they mean --
+        # see `provider_for_model`, which is why they carry the prefix.
+        "deepseek-pro": "deepseek-v4-pro",
+        "deepseek-flash": "deepseek-v4-flash",
         # Aliases, so a block that thinks in Claude tiers still lands somewhere
         # sensible rather than silently defaulting to flash.
         "opus": "deepseek-v4-pro",
@@ -220,6 +225,30 @@ def get(name: Optional[str]) -> Optional[Provider]:
     if not name:
         return None
     return PROVIDERS.get(name.strip().lower())
+
+
+def provider_for_model(model: Optional[str]) -> Optional[Provider]:
+    """Which provider a model name unambiguously belongs to, if any.
+
+    This is what lets `model: deepseek-pro` route on its own, with no separate
+    marker: naming a vendor's model *is* choosing that vendor, and making
+    someone say it twice is a rule they will eventually forget on the one block
+    where it matters.
+
+    Matched on the **vendor prefix only** — `deepseek-anything` — never on the
+    tier map. The tier map deliberately contains bare words like `pro`, `opus`
+    and `haiku` so they can be resolved once a provider is already chosen; if
+    they were matched here instead, an ordinary `model: opus` block would route
+    itself to DeepSeek. Prefix matching also survives the vendor shipping a
+    model Sandglass has never heard of.
+    """
+    if not model:
+        return None
+    key = model.strip().lower()
+    for provider in PROVIDERS.values():
+        if key == provider.name or key.startswith(f"{provider.name}-"):
+            return provider
+    return None
 
 
 def looks_malformed(key: str) -> Optional[str]:

@@ -73,6 +73,28 @@ def test_resolve_model(asked, expected):
     assert providers.DEEPSEEK.resolve_model(asked) == expected
 
 
+@pytest.mark.parametrize(
+    "model", ["deepseek-pro", "deepseek-flash", "deepseek-v4-pro", "DeepSeek-Pro",
+              "deepseek", "deepseek-v9-something-new"],
+)
+def test_a_vendor_prefixed_model_names_its_own_provider(model):
+    """Naming a vendor's model IS choosing that vendor — the whole point of
+    letting `model: deepseek-pro` route without a second marker."""
+    assert providers.provider_for_model(model) is providers.DEEPSEEK
+
+
+@pytest.mark.parametrize(
+    "model",
+    # Every one of these is in DEEPSEEK.tiers so it can be resolved *after* a
+    # provider is chosen. Matching on the tier map instead of the vendor prefix
+    # would send an ordinary `model: opus` block to DeepSeek.
+    ["opus", "sonnet", "haiku", "pro", "flash", "cheap", "high",
+     "claude-opus-4-8", "", None],
+)
+def test_an_anthropic_model_never_names_a_provider(model):
+    assert providers.provider_for_model(model) is None
+
+
 def test_an_unknown_model_name_is_forwarded_not_rejected():
     """Model names are the vendor's to change; failing a block over one Sandglass
     hasn't heard of would age badly."""
@@ -99,6 +121,26 @@ def test_naming_the_provider_alone_takes_its_default_model(qm):
     added = qm.get_prompt(int(qm.add_prompt(text="**CLINE: deepseek**\n\nDo it.")))
     assert added.provider == "deepseek"
     assert added.model == "deepseek-v4-flash"
+
+
+def test_the_model_alone_routes_the_block(qm):
+    """`model: deepseek-pro` with no marker anywhere — the spelling most people
+    reach for first, and the one that would otherwise fail confusingly by
+    asking Claude for a model it has never heard of."""
+    added = qm.get_prompt(int(qm.add_prompt(text="model: deepseek-pro\n\nDo it.")))
+    assert added.provider == "deepseek"
+    assert added.model == "deepseek-pro"
+
+
+def test_the_model_option_alone_routes_the_block(qm):
+    added = qm.get_prompt(int(qm.add_prompt(text="Do it.", model="deepseek-pro")))
+    assert added.provider == "deepseek"
+
+
+def test_an_ordinary_model_header_still_does_not_route(qm):
+    added = qm.get_prompt(int(qm.add_prompt(text="model: opus\n\nDo it.")))
+    assert added.provider is None
+    assert added.model == "opus"
 
 
 def test_provider_front_matter_beats_a_marker(qm):

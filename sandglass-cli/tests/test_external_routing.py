@@ -169,6 +169,42 @@ def test_an_external_rate_limit_does_not_park_a_claude_account(qm):
     assert pool.current_name == "a"
 
 
+def test_a_model_name_alone_is_enough_to_route(qm):
+    qm.add_prompt(text="model: deepseek-pro\n\nTask.")
+    client = _RecordingClient()
+
+    asyncio.run(_engine(qm, client).execute_queue())
+
+    assert client.calls[0]["provider"][0].name == "deepseek"
+    assert client.calls[0]["model"] == "deepseek-v4-pro"
+
+
+def test_a_provider_model_is_not_forwarded_to_claude_on_fallback(qm):
+    """The bug the `model:` spelling exposes. A block that falls back to
+    Anthropic — no key, or --no-external — would otherwise ask Claude for
+    `deepseek-pro`, turning a missing config line into a hard failure on every
+    marked block. Which is exactly what falling back exists to avoid."""
+    qm.add_prompt(text="model: deepseek-pro\n\nTask.")
+    client = _RecordingClient()
+
+    result = asyncio.run(
+        _engine(qm, client, provider_registry=_registry()).execute_queue()
+    )
+
+    assert result.completed == 1
+    assert client.calls[0]["provider"] is None
+    assert client.calls[0]["model"] == client.model  # the run default, not deepseek-pro
+
+
+def test_no_external_also_drops_a_marker_supplied_provider_model(qm):
+    qm.add_prompt(text="**CLINE: pro**\n\nTask.")
+    client = _RecordingClient()
+
+    asyncio.run(_engine(qm, client, allow_external=False).execute_queue())
+
+    assert client.calls[0]["model"] == client.model
+
+
 def test_the_model_sent_externally_is_the_providers_own(qm):
     """A Claude model id reaching a third-party endpoint is silently remapped to
     whatever that vendor considers equivalent, so the run would quietly get a

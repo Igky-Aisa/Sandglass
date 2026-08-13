@@ -175,13 +175,14 @@ Add the dirty-flag badge to the strategy editor...
   normally share one warm session (that's what stops each one re-reading the
   whole project), so use this only when prior context would actively harm the
   work: an independent review, a genuine second opinion.
-- `provider: deepseek` — run this block on DeepSeek instead of Claude, so it
-  doesn't eat subscription quota. Equivalent marker: `**CLINE: pro**` (or
-  `flash`) near the top. **Only use it for mechanical work you'd be comfortable
-  sending to a third party** — the block's prompt, the injected project brief
-  and every file it reads go to that vendor, not Anthropic. Needs a key
-  (`sandglass providers set deepseek`); without one the block quietly runs on
-  Claude instead. Note `**TIER: CHEAP — EXTERNAL-OK**` does *not* route — that
+- `model: deepseek-pro` (or `deepseek-flash`) — run this block on DeepSeek
+  instead of Claude, so it doesn't eat subscription quota. Naming the model is
+  all it takes; `provider: deepseek` and a `**CLINE: pro**` marker mean the
+  same thing. **Only use it for mechanical work you'd be comfortable sending to
+  a third party** — the block's prompt, the injected project brief and every
+  file it reads go to that vendor, not Anthropic. Needs a key (`sandglass
+  providers set deepseek`); without one the block runs on Claude instead, with
+  a warning. Note `**TIER: CHEAP — EXTERNAL-OK**` does *not* route — that
   marker means "would be fine externally", this one means "do it".
 - A `**TIER: SONNET**`-style marker near the top works too and maps to a
   sensible model+effort pair, but explicit front matter is clearer and wins.

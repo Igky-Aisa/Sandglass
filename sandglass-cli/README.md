@@ -305,18 +305,25 @@ sandglass providers set deepseek --key sk-...   # prompted, hidden, if omitted
 sandglass providers list                        # what's configured
 ```
 
-Then mark the block:
+Then say so in the block. Naming the model is enough — you don't need a
+separate marker as well:
 
 ```
-**CLINE: pro** — external-OK
+model: deepseek-pro
 
 Rename every `foo_bar` to `fooBar` across `lib/models/`.
 ```
 
-`pro` → `deepseek-v4-pro`, `flash` → `deepseek-v4-flash`; a literal model id
-works too, as does `provider: deepseek` front matter (which wins over a
-marker). Everything else is unchanged: the same tools, the same artifact gate,
-the same cut into `prompt_history.md`.
+`deepseek-pro` → `deepseek-v4-pro`, `deepseek-flash` → `deepseek-v4-flash`;
+literal ids work too, and so does `--model deepseek-pro` on `queue add`. Two
+other spellings mean the same thing: a `**CLINE: pro**` marker near the top of
+the block, and `provider: deepseek` front matter (which wins over everything).
+Everything else is unchanged: the same tools, the same artifact gate, the same
+cut into `prompt_history.md`.
+
+Routing only ever triggers on a **vendor-prefixed** name, so `model: opus`
+stays on Claude. That is why the tier is spelled `deepseek-pro` rather than
+plain `pro` — a bare `pro` couldn't say which vendor it meant.
 
 **What this is for.** The account pool spreads a queue across subscriptions
 you already pay a flat rate for — free at the margin, but finite. An external
@@ -344,6 +351,8 @@ blocks are the ones worth spending pennies on.
 
 No key configured, or `--no-external`? The block runs on Claude, with a warning
 — the fallback direction is always *toward* Anthropic, never silently outward.
+Its `deepseek-…` model name is swapped for the run default at the same time,
+since Claude has never heard of it; that substitution is printed too.
 Keys live in `~/.sandglass/providers.json` (or `$DEEPSEEK_API_KEY`), outside
 the repo, for the same reason account tokens do.
 

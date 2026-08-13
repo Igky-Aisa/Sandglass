@@ -315,15 +315,22 @@ sandglass providers set deepseek
 It asks for your DeepSeek API key and hides it as you type. `sandglass
 providers list` shows what's configured.
 
-**Then mark the block** — put this near the top, above the task text:
+**Then say so in the block** — just name the model at the very top, followed by
+a blank line, the same way you'd write `model: opus`:
 
 ```
-**CLINE: pro** — external-OK
+model: deepseek-pro
+
+Rename every foo_bar to fooBar across the models folder.
 ```
 
-`pro` is the strong model, `flash` the cheap fast one. Everything else works
-exactly as normal: same file edits, same "did it actually change anything"
-check, same cut into `prompt_history.md` when it finishes.
+`deepseek-pro` is the strong model, `deepseek-flash` the cheap fast one. If you
+prefer, `**CLINE: pro**` as a marker near the top does exactly the same thing.
+Everything else works as normal: same file edits, same "did it actually change
+anything" check, same cut into `prompt_history.md` when it finishes.
+
+Only names starting with `deepseek-` send a block away. `model: opus` and
+`model: sonnet` stay on Claude, as always.
 
 **When NOT to use it.** The block's text, the project brief Sandglass injects,
 and every file the block reads all get sent to DeepSeek — not Anthropic, and
@@ -339,10 +346,12 @@ twice for anything you wouldn't paste into a stranger's website.
   run using Anthropic's rates, so what it prints for a DeepSeek block is a
   rough stand-in — your real bill is on DeepSeek's dashboard. The run summary
   says which blocks those were.
-- **Forgot the key?** The block runs on Claude anyway, with a warning. It never
-  fails the queue, and it never goes external by accident — only a marked
-  block ever leaves Anthropic. To force a whole run back onto Claude, use
-  `sandglass execute --no-external`.
+- **Forgot the key?** The block runs on Claude anyway, with a warning, and
+  Sandglass quietly swaps `deepseek-pro` for the normal model — Claude has
+  never heard of DeepSeek's models, so leaving the name in place would just
+  make the block fail. It never fails the queue, and it never goes external by
+  accident: only a block that names DeepSeek ever leaves Anthropic. To force a
+  whole run back onto Claude, use `sandglass execute --no-external`.
 
 ---
 
