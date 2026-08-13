@@ -7,7 +7,7 @@ import os
 import re
 from typing import Optional
 
-from . import prompt_source
+from . import prompt_source, providers
 from .models import PromptObject
 from .storage import StorageService
 
@@ -17,7 +17,7 @@ _TITLE_MAX = 60
 # Front-matter keys a prompt block may set for itself. Anything else on a
 # leading `key: value` line is treated as prose, not configuration -- a prompt
 # is free to start with "note: ..." without Sandglass reinterpreting it.
-_HEADER_KEYS = ("model", "effort", "isolate")
+_HEADER_KEYS = ("model", "effort", "isolate", "provider")
 # Values that make `isolate: <x>` mean "yes". Anything else is read as "no",
 # so a typo degrades to the cheaper default rather than silently opting a
 # block out of the chain.
@@ -51,6 +51,27 @@ TIER_MAP: dict[str, tuple[str | None, str | None]] = {
 # appear in prose further down, and a marker buried on line 40 isn't front
 # matter anyway.
 _TIER_SCAN_CHARS = 300
+
+# The marker that sends a block to a non-Anthropic provider -- `**CLINE: pro**`,
+# `**CLINE: flash**`, or a literal model id. Read in the same place and the same
+# way as `TIER:`, because it is the same kind of thing: a note the prompt author
+# already writes for a human reader, which Sandglass can act on.
+#
+# It is a SEPARATE marker from `TIER:` on purpose. Queue files in this project
+# already carry `**TIER: CHEAP - EXTERNAL-OK**` on blocks written months ago,
+# and those must keep meaning what they meant when they were written (haiku, on
+# Anthropic). "EXTERNAL-OK" is the author granting *permission* for a block to
+# leave Anthropic; `CLINE:` is the author *exercising* it. Conflating the two
+# would retroactively reroute a pile of existing blocks to a third party on the
+# strength of a comment nobody wrote with that consequence in mind.
+_CLINE_RE = re.compile(
+    r"\*{0,2}(?:CLINE|EXTERNAL)\s*:\s*([A-Za-z0-9._\-]+)", re.IGNORECASE
+)
+# Which provider a bare tier name means. Only one external provider is wired up
+# (see providers.py), so `CLINE: pro` needs no vendor name -- but a block that
+# does name one (`CLINE: deepseek-v4-pro`) still routes correctly, because the
+# tier value is passed to the provider to resolve.
+DEFAULT_EXTERNAL_PROVIDER = "deepseek"
 
 
 class QueueManager:
@@ -115,10 +136,17 @@ class QueueManager:
         text = text or ""
         headers, text = self._extract_headers(text)
         tier_model, tier_effort = self._tier_defaults(text) if use_tiers else (None, None)
+        ext_provider, ext_model = (
+            self._external_defaults(text) if use_tiers else (None, None)
+        )
         # Precedence, most explicit first: caller argument, front matter, tier
         # marker. A tier marker is the weakest signal because it's a hint
         # written for a human reader that Sandglass happens to be able to use.
-        model = model or headers.get("model") or tier_model
+        provider = headers.get("provider") or ext_provider
+        # An external block's model has to come from the provider's own
+        # namespace -- `opus` means nothing to DeepSeek -- so a routing marker
+        # outranks a TIER marker on model choice while leaving effort alone.
+        model = model or headers.get("model") or ext_model or tier_model
         effort = effort or headers.get("effort") or tier_effort
         isolate = headers.get("isolate", "").strip().lower() in _TRUTHY
 
@@ -134,12 +162,14 @@ class QueueManager:
             effort=effort,
             origin_file=origin_file,
             isolate=isolate,
+            provider=provider,
         )
         queue.append(prompt)
         self.save_queue(queue)
         logger.info(
-            "Added prompt %s to queue (source=%s, model=%s, effort=%s)",
+            "Added prompt %s to queue (source=%s, model=%s, effort=%s, provider=%s)",
             prompt_id, source, model or "default", effort or "default",
+            provider or "anthropic",
         )
         return prompt_id
 
@@ -267,6 +297,34 @@ class QueueManager:
         if not match:
             return None, None
         return TIER_MAP.get(match.group(1).lower(), (None, None))
+
+    @staticmethod
+    def _external_defaults(text: str) -> tuple[str | None, str | None]:
+        """``(provider, model)`` implied by a `CLINE:`/`EXTERNAL:` marker.
+
+        Returns ``(None, None)`` when the block carries no routing marker,
+        which is the overwhelming majority of blocks and means "Anthropic".
+
+        The value may be a tier the provider understands (`pro`, `flash`), a
+        literal model id (`deepseek-v4-pro`), or the provider's own name
+        (`deepseek`) to take its default model. An unrecognised value is
+        forwarded to the provider rather than rejected here: model names are
+        the vendor's to change, and failing a block over a name Sandglass
+        hasn't heard of would age worse than passing it through.
+        """
+        match = _CLINE_RE.search(text[:_TIER_SCAN_CHARS])
+        if not match:
+            return None, None
+        value = match.group(1).strip()
+
+        named = providers.get(value)
+        if named is not None:  # `CLINE: deepseek`
+            return named.name, named.default_model
+
+        provider = providers.get(DEFAULT_EXTERNAL_PROVIDER)
+        if provider is None:  # pragma: no cover - only if the registry is gutted
+            return None, None
+        return provider.name, provider.resolve_model(value)
 
     @staticmethod
     def _derive_title(text: str, file_path: str | None) -> str:

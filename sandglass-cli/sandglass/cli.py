@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -25,7 +26,7 @@ from .execution_engine import (
     SESSION_MODES,
     ExecutionEngine,
 )
-from . import project_docs, quiet_hours, run_report, updater
+from . import project_docs, providers as providers_mod, quiet_hours, run_report, updater
 from .project_scaffold import new_claude_project, update_claude_md_template
 from .prompt_source import DEFAULT_QUEUE_SOURCE
 from .queue_manager import QueueManager
@@ -264,6 +265,11 @@ def queue_add(
         bits.append(f"model: {added.model}")
     if added.effort:
         bits.append(f"effort: {added.effort}")
+    if added.provider:
+        # Never let this one be inferred from the model name alone — "it runs
+        # somewhere other than Anthropic" is the fact worth seeing at the
+        # moment the prompt is queued, not at 3am in a log.
+        bits.append(f"provider: {added.provider}")
     suffix = f" [dim]({', '.join(bits)})[/dim]" if bits else ""
     console.print(f"[green]✓ Added prompt {int(prompt_id)} to queue[/green]{suffix}")
 
@@ -285,12 +291,14 @@ def queue_list() -> None:
     table.add_column("Source", style="magenta")
     table.add_column("Model", style="green")
     table.add_column("Effort", style="green")
+    table.add_column("Runs on", style="yellow")
     table.add_column("Added At", style="dim")
 
     for i, p in enumerate(prompts, start=1):
         table.add_row(
             str(i), p.title, p.source,
-            p.model or "(default)", p.effort or "(default)", p.added_at,
+            p.model or "(default)", p.effort or "(default)",
+            p.provider or "anthropic", p.added_at,
         )
 
     console.print(table)
@@ -457,6 +465,17 @@ def execute(
             "'rotate' requires the file and errors if it is missing; 'off' "
             "ignores it and waits out the quota on the current login. Accounts "
             "must be your own — sharing credentials breaks Anthropic's terms."
+        ),
+    ),
+    external: bool = typer.Option(
+        True,
+        "--external/--no-external",
+        help=(
+            "Honour a block's `**CLINE: pro**` / `provider:` marker and route it "
+            "to a non-Anthropic endpoint (DeepSeek), using the key from "
+            "~/.sandglass/providers.json. --no-external forces every block onto "
+            "Anthropic. Only marked blocks are ever routed out; an unmarked "
+            "block never leaves Anthropic either way."
         ),
     ),
     skip_executed: bool = typer.Option(
@@ -658,6 +677,25 @@ def execute(
             "(--no-brief to let each block read the full work_log itself).[/dim]"
         )
 
+    registry = _load_provider_registry()
+    routed = [p for p in qm.load_queue() if p.provider]
+    if routed and external:
+        vendors = ", ".join(sorted({p.provider for p in routed if p.provider}))
+        # Said before the run rather than in the log afterwards: this is the
+        # point where code leaves Anthropic for another vendor, and it is the
+        # last moment Ctrl-C is still free.
+        console.print(
+            f"[yellow]↗ {len(routed)} block(s) are marked for {vendors}. Their "
+            "prompts, the project brief and any files they read will be sent "
+            "there, under that vendor's retention policy — not Anthropic's. "
+            "--no-external keeps everything on Claude.[/yellow]"
+        )
+    elif routed:
+        console.print(
+            f"[dim]--no-external: {len(routed)} externally-marked block(s) will "
+            "run on Anthropic.[/dim]"
+        )
+
     engine = ExecutionEngine(
         qm, client,
         require_artifact=require_artifact,
@@ -666,6 +704,8 @@ def execute(
         session_mode=session_mode,
         brief=brief,
         account_pool=pool,
+        provider_registry=registry,
+        allow_external=external,
     )
     try:
         if once:
@@ -916,6 +956,110 @@ def accounts(
         )
     else:
         console.print("\n[green]All accounts working.[/green]")
+
+
+def _load_provider_registry() -> "providers_mod.ProviderRegistry | None":
+    """Read the external-provider keys, or stop the run if the file is broken.
+
+    A missing file is normal and means "no block can route externally". A file
+    that exists but is malformed is an error for the same reason it is in the
+    account pool: a typo would otherwise surface hours later as a block
+    quietly running on Claude when it was meant to run somewhere cheap.
+    """
+    try:
+        return providers_mod.ProviderRegistry.load()
+    except providers_mod.ProvidersError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+
+providers_app = typer.Typer(help="External (non-Anthropic) model providers.")
+app.add_typer(providers_app, name="providers")
+
+
+@providers_app.command("list")
+def providers_list() -> None:
+    """Show which external providers have a usable API key on this machine."""
+    registry = _load_provider_registry()
+    path = providers_mod.ProviderRegistry.default_path()
+    console.print(f"[bold]Providers[/bold] [dim]({path})[/dim]")
+
+    for name, provider in sorted(providers_mod.PROVIDERS.items()):
+        key = registry.key_for(name) if registry else None
+        if key:
+            problem = providers_mod.looks_malformed(key)
+            mark = (
+                "[green]●[/green] key configured" if not problem
+                else f"[yellow]○[/yellow] key looks wrong: {problem}"
+            )
+        else:
+            mark = "[dim]○ no key[/dim]"
+        console.print(f"  {mark} — {name}  [dim]{provider.base_url}[/dim]")
+        console.print(
+            f"      [dim]tiers: {', '.join(sorted(set(provider.tiers.values())))} "
+            f"· env fallback: {provider.key_env} · {provider.docs_url}[/dim]"
+        )
+
+    console.print(
+        "\n[dim]A block reaches one of these only by asking: put "
+        "[cyan]**CLINE: pro**[/cyan] (or [cyan]provider: deepseek[/cyan]) near the "
+        "top of the block. Unmarked blocks always run on Anthropic.[/dim]"
+    )
+
+
+@providers_app.command("set")
+def providers_set(
+    name: str = typer.Argument(..., help="Provider name, e.g. deepseek."),
+    api_key: str = typer.Option(
+        ..., "--key", prompt=True, hide_input=True,
+        help="The provider's API key. Prompted for (hidden) if not passed.",
+    ),
+) -> None:
+    """Store an API key for an external provider, outside the project tree.
+
+    Written to ~/.sandglass/providers.json for the same reason account tokens
+    are: `sandglass execute` runs blocks with `bypassPermissions` inside the
+    project directory and persists their output verbatim, so a key kept in the
+    repo is one incurious `cat` away from a response file that outlives the run.
+    """
+    provider = providers_mod.get(name)
+    if provider is None:
+        console.print(
+            f"[red]Error: unknown provider {name!r}. Known: "
+            f"{', '.join(sorted(providers_mod.PROVIDERS))}.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    problem = providers_mod.looks_malformed(api_key)
+    if problem:
+        # Format only — a live check would cost a request, and the key will
+        # announce itself the first time a block actually uses it.
+        console.print(f"[yellow]⚠ That key {problem}. Storing it anyway.[/yellow]")
+
+    path = providers_mod.ProviderRegistry.default_path()
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            console.print(f"[red]Error: could not read {path}: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
+    if not isinstance(existing, dict):
+        existing = {}
+    # Preserve whichever shape the file is already in, so this never silently
+    # rewrites a hand-authored file into the other one.
+    target = existing.setdefault("providers", {}) if "providers" in existing else existing
+    target[provider.name] = {"api_key": api_key}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+    console.print(f"[green]✓ Key stored for '{provider.name}' in {path}[/green]")
+    console.print(
+        f"[dim]Blocks marked [cyan]**CLINE: pro**[/cyan] now run on "
+        f"{provider.tiers['pro']} instead of consuming Claude quota.[/dim]"
+    )
 
 
 @app.command()

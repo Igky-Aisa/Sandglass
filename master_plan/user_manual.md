@@ -300,6 +300,50 @@ and every block ran on the default model no matter what it said.
 `model:`/`effort:` header always beats it. If you'd rather Sandglass ignored
 markers entirely, run `sandglass execute --no-tiers`.
 
+### Running a block on DeepSeek instead of Claude
+
+Some blocks are pure mechanics — a rename across forty files, a batch of
+docstrings — and there's no reason for them to eat subscription quota you're
+saving for the hard work. Those can run on DeepSeek instead.
+
+**Setup, once per machine:**
+
+```
+sandglass providers set deepseek
+```
+
+It asks for your DeepSeek API key and hides it as you type. `sandglass
+providers list` shows what's configured.
+
+**Then mark the block** — put this near the top, above the task text:
+
+```
+**CLINE: pro** — external-OK
+```
+
+`pro` is the strong model, `flash` the cheap fast one. Everything else works
+exactly as normal: same file edits, same "did it actually change anything"
+check, same cut into `prompt_history.md` when it finishes.
+
+**When NOT to use it.** The block's text, the project brief Sandglass injects,
+and every file the block reads all get sent to DeepSeek — not Anthropic, and
+under DeepSeek's own data policy. Fine for a rename in your own repo; think
+twice for anything you wouldn't paste into a stranger's website.
+
+**Three more gotchas:**
+
+- `**TIER: CHEAP — EXTERNAL-OK**` on your older blocks does **not** send them
+  to DeepSeek. That marker means "this would be OK externally"; `CLINE:` means
+  "actually do it". Old blocks keep running on Claude.
+- **The cost figure for these blocks is a guess.** Sandglass can only price a
+  run using Anthropic's rates, so what it prints for a DeepSeek block is a
+  rough stand-in — your real bill is on DeepSeek's dashboard. The run summary
+  says which blocks those were.
+- **Forgot the key?** The block runs on Claude anyway, with a warning. It never
+  fails the queue, and it never goes external by accident — only a marked
+  block ever leaves Anthropic. To force a whole run back onto Claude, use
+  `sandglass execute --no-external`.
+
 ---
 
 ## 5. Using future_prompts.md as your default queue

@@ -38,6 +38,12 @@ class PromptObject:
     # queue is chained. For work that must not inherit earlier context — a
     # second opinion, a review that shouldn't see the author's reasoning.
     isolate: bool = False
+    # Send this block to a non-Anthropic provider (see providers.py). None —
+    # the default and the only value a block gets without saying so explicitly
+    # — means Anthropic. Routing externally sends the prompt and whatever files
+    # the agent reads to a third party, so it is never inferred: a block leaves
+    # Anthropic only when its author wrote a marker saying it may.
+    provider: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -56,6 +62,7 @@ class PromptObject:
             origin_file=data.get("origin_file"),
             session_id=data.get("session_id"),
             isolate=bool(data.get("isolate", False)),
+            provider=data.get("provider"),
         )
 
 
@@ -94,6 +101,12 @@ class Response:
     # for the next prompt, so what gets recorded is always what actually
     # happened rather than what was intended.
     session_id: str | None = None
+    # Which non-Anthropic provider served this response, if any. Matters for
+    # reading `cost_usd`: the CLI prices every run off Anthropic's table, so on
+    # an external block that figure is a rough stand-in, not a bill. Recorded
+    # so the summary can say which numbers are which instead of silently
+    # totalling two different currencies of estimate.
+    provider: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -112,6 +125,7 @@ class Response:
             cache_read_tokens=data.get("cache_read_tokens", 0),
             cost_usd=data.get("cost_usd", 0.0),
             session_id=data.get("session_id"),
+            provider=data.get("provider"),
         )
 
 

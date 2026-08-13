@@ -340,3 +340,178 @@
 - Rotation is untested against a *real* second account; only fakes so far (`tests/test_accounts.py`, 17 cases: the 1→2→3→1 cycle, drain-then-wait, no-pool, earliest-reset, revival, restart persistence, redaction).
 - **Exhaustion times persist** to `.sandglass/accounts_state.json` (names + epochs, no tokens) — added because "save the timestamp" only pays off across a restart, which is exactly when a crashed overnight run would otherwise burn one block per dead account rediscovering what it already knew.
 - **The token pre-flight was wrong and is rewritten.** It inferred validity from `claude auth status` returning an email, so it flagged all three of the user's working tokens as broken. `auth status` does no validation whatsoever — `loggedIn: true` for the literal string `x` — and never carries an email under `oauth_token` auth. Free checks are now limited to what is actually checkable (empty/truncated/whitespace/placeholder, duplicate tokens); real verification is `sandglass accounts --probe`, one minimal request per account, run from an empty temp dir so `CLAUDE.md` isn't discovered. **Third time this session that asserting instead of verifying cost a round-trip** — the pattern is one-sided testing: the bogus-token case was checked, the valid-token case was not.
+
+## 2026-08-13 - Claude (Opus 5) - External provider routing (DeepSeek)
+
+### 1. Context Snapshot
+- **Goal**: Let a block opt out of Claude quota entirely and run on DeepSeek, so mechanical work stops competing with the work that actually needs Opus.
+- **State**: `sandglass-cli/` — new `sandglass/providers.py`, `tests/test_providers.py`, `tests/test_external_routing.py`; touched `queue_manager.py`, `claude_client.py`, `execution_engine.py`, `models.py`, `cli.py`, both CLAUDE.mds, README, CHANGELOG, user_manual.
+- **Previous Blocker**: none new; the 050 self-deadlock is still open (see the previous entry).
+
+### 2. Work Done
+- **This is not a second account pool, it is the opposite trade.** The pool spreads a queue over subscriptions already paid for — free at the margin, finite. An external provider is metered and never free, but spends no quota. That framing decided every default below.
+- **`**TIER: CHEAP — EXTERNAL-OK**` deliberately does NOT route.** It sits on blocks written months before this feature and means "would be fine externally"; the new `**CLINE: pro**` means "do it". Treating them as one marker would have retroactively shipped a pile of old blocks to a third party on the strength of a comment written without that consequence in mind. Separate regex, separate meaning, test pinning it.
+- **`CLAUDE_CODE_OAUTH_TOKEN` is popped from the external subprocess env** (`Provider.subprocess_env`). Left set alongside a redirected `ANTHROPIC_BASE_URL`, a live subscription credential would go to DeepSeek as a bearer token and nothing in the output would look wrong. Single most consequential line in the module; has its own test.
+- **A routed block is forced out of the chain in both directions** (`_resolve_session` returns `(None, False)` first). Resuming would replay the accumulated Claude transcript — every file the queue has read — to a third party; letting its turn into the chain would give later Claude blocks another vendor's output as their history. Costs a cold start, which is what the block was routed away to make cheap anyway.
+- **External runs are excluded from `AccountPool.record_usage`, and an external 429 no longer rotates accounts.** Both would misreport: the first inflates an account's burn while hiding third-party spend, the second parks a healthy subscription for an hour on someone else's quota.
+- **Missing key / unknown provider / `--no-external` fall back to Claude with a warning rather than failing.** A routing marker is a cost preference, not a correctness requirement — and the fallback direction is always *toward* Anthropic, never silently outward.
+- Model ids are resolved through the provider (`pro`→`deepseek-v4-pro`), never `self.model`: a Claude id sent to DeepSeek is silently remapped to their equivalent, so the run would quietly get a model nobody chose.
+
+### 3. Next Steps (For the next agent)
+- **Never exercised against the live DeepSeek endpoint** — all 12 routing tests use fakes. Before trusting it to a batch, run one real marked block and check three things: that `--model deepseek-v4-pro` is accepted, that tool use (file writes) actually works over their endpoint, and that a real 429 from them is still classified by `_looks_like_quota_error`.
+- Cost for external blocks is priced off Anthropic's table because that is the only one the CLI has. If it turns out worth having real numbers, the place to add them is a per-provider rate table in `providers.py` applied in `_response_from_usage`.
+- `providers.py` is written for N providers but wired for one. Adding another is a `Provider(...)` entry plus its tier map; nothing else should need to change.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - second
+
+### 1. Context Snapshot
+- **Goal**: second
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: second
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - First prompt
+
+### 1. Context Snapshot
+- **Goal**: First prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: First prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - Second prompt
+
+### 1. Context Snapshot
+- **Goal**: Second prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: Second prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - a manually added prompt
+
+### 1. Context Snapshot
+- **Goal**: a manually added prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: a manually added prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - second
+
+### 1. Context Snapshot
+- **Goal**: second
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: second
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - second
+
+### 1. Context Snapshot
+- **Goal**: second
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: second
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-13 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.

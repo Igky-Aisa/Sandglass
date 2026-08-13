@@ -293,6 +293,60 @@ Tier markers map to a model+effort pair (`SONNET` → `sonnet`/`medium`,
 use the CLI defaults. `queue list` and `execute --dry-run` both show what each
 prompt will actually run as.
 
+## Sending a block somewhere other than Anthropic
+
+Claude Code talks to any endpoint that speaks the Anthropic wire format, and
+DeepSeek publishes one for exactly this purpose. A block that says so runs
+there instead of spending Claude quota — with every tool it normally has, since
+file edits and shell commands never leave your machine.
+
+```bash
+sandglass providers set deepseek --key sk-...   # prompted, hidden, if omitted
+sandglass providers list                        # what's configured
+```
+
+Then mark the block:
+
+```
+**CLINE: pro** — external-OK
+
+Rename every `foo_bar` to `fooBar` across `lib/models/`.
+```
+
+`pro` → `deepseek-v4-pro`, `flash` → `deepseek-v4-flash`; a literal model id
+works too, as does `provider: deepseek` front matter (which wins over a
+marker). Everything else is unchanged: the same tools, the same artifact gate,
+the same cut into `prompt_history.md`.
+
+**What this is for.** The account pool spreads a queue across subscriptions
+you already pay a flat rate for — free at the margin, but finite. An external
+provider is the opposite trade: metered, so never free, but it doesn't consume
+quota you were saving for the work that actually needs Opus. Mechanical
+blocks are the ones worth spending pennies on.
+
+**Four things worth knowing before you use it:**
+
+- **Only marked blocks ever leave Anthropic.** An unmarked block never routes
+  out, whatever is configured. Routing sends the prompt, the injected project
+  brief, and any file the agent reads to that vendor under *their* retention
+  policy — a decision only the block's author can make.
+- **`**TIER: CHEAP — EXTERNAL-OK**` does not route.** It predates this feature
+  and appears on blocks written long before it existed; "EXTERNAL-OK" is the
+  author granting permission, `CLINE:` is exercising it. Old blocks keep
+  running on Claude.
+- **A routed block runs cold, outside the chain.** Resuming would replay the
+  whole accumulated Claude conversation to a third party, and letting its
+  output into the chain would give later Claude blocks another vendor's work as
+  their own history.
+- **Its reported cost is an estimate.** The CLI prices every run off Anthropic's
+  table because that is the only table it has. The run summary says which
+  blocks those were, and they are never charged to a Claude account's totals.
+
+No key configured, or `--no-external`? The block runs on Claude, with a warning
+— the fallback direction is always *toward* Anthropic, never silently outward.
+Keys live in `~/.sandglass/providers.json` (or `$DEEPSEEK_API_KEY`), outside
+the repo, for the same reason account tokens do.
+
 ## Installing and updating on another machine
 
 Sandglass is **not on PyPI**. The name `sandglass` there belongs to an

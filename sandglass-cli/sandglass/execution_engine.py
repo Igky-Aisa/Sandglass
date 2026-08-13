@@ -20,7 +20,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from . import notify, project_docs, prompt_source, run_report, workspace
+from . import notify, project_docs, prompt_source, providers, run_report, workspace
 from .accounts import AccountPool
 from .claude_client import ClaudeClient, QuotaExceededError
 from .models import ExecutionResult, PromptObject, Response
@@ -339,6 +339,8 @@ class ExecutionEngine:
         skip_executed: bool = True,
         on_refusal: str = ON_REFUSAL_ASK,
         account_pool: "AccountPool | None" = None,
+        provider_registry: "providers.ProviderRegistry | None" = None,
+        allow_external: bool = True,
     ):
         self.queue_manager = queue_manager
         self.claude_client = claude_client
@@ -380,6 +382,17 @@ class ExecutionEngine:
         # Whether a block that changed no file gets asked what happened before
         # the run gives up on the whole queue. See _ask_why_nothing_changed.
         self.on_refusal = on_refusal
+        # API keys for non-Anthropic endpoints a block may ask to be routed to.
+        # Empty registry == none configured, which simply means every block
+        # runs on Anthropic. See providers.py.
+        self.provider_registry = provider_registry
+        # Kill switch for a run: `--no-external` forces every block onto
+        # Anthropic regardless of its marker. For the night you'd rather spend
+        # subscription quota than send anything to a third party.
+        self.allow_external = allow_external
+        # Providers already reported as unusable this run, so a queue with
+        # twenty externally-marked blocks says so once instead of twenty times.
+        self._provider_warned: set[str] = set()
 
     # --- Public API -------------------------------------------------------
 
@@ -587,7 +600,11 @@ class ExecutionEngine:
                     break
 
             results.append(response)
-            if self.account_pool is not None:
+            if self.account_pool is not None and not response.provider:
+                # Only Anthropic traffic is charged to a Claude account. An
+                # external block spends someone else's metered credit, and
+                # folding it in would misreport both — inflating an account's
+                # apparent burn and hiding the third-party spend entirely.
                 self.account_pool.record_usage(response.tokens_used, response.cost_usd)
             total_tokens += response.tokens_used
             total_cost += response.cost_usd
@@ -918,6 +935,65 @@ class ExecutionEngine:
                 await asyncio.sleep(min(ANIMATION_TICK_SECONDS, remaining))
         console.print("[green]⌛ Resuming — retrying the queue now.[/green]")
 
+    def _resolve_provider(
+        self, prompt: PromptObject
+    ) -> "tuple[providers.Provider, str] | None":
+        """The external endpoint this block asked for, if it can be used.
+
+        ``None`` means "run it on Anthropic", which covers four cases: the
+        block never asked, `--no-external` overrode it, the marker named a
+        provider Sandglass doesn't know, or no API key is configured for the
+        one it named.
+
+        The last two **fall back rather than fail**, loudly. A routing marker
+        is a preference about cost, not a correctness requirement: the block
+        describes work that Claude can do perfectly well, so refusing to run it
+        would stop a queue over a missing config line. The fallback direction
+        is also the safe one — toward Anthropic, never silently outward to a
+        third party — which is what makes it a defensible default rather than
+        a guess.
+        """
+        if not prompt.provider:
+            return None
+
+        name = prompt.provider
+        if not self.allow_external:
+            if name not in self._provider_warned:
+                self._provider_warned.add(name)
+                console.print(
+                    f"  [yellow]--no-external: ignoring this block's '{name}' "
+                    "marker and running it on Anthropic.[/yellow]"
+                )
+            return None
+
+        provider = providers.get(name)
+        if provider is None:
+            if name not in self._provider_warned:
+                self._provider_warned.add(name)
+                console.print(
+                    f"  [yellow]Unknown provider {name!r} — running on Anthropic "
+                    f"instead. Known: {', '.join(sorted(providers.PROVIDERS))}.[/yellow]"
+                )
+            return None
+
+        key = self.provider_registry.key_for(name) if self.provider_registry else None
+        if not key:
+            if name not in self._provider_warned:
+                self._provider_warned.add(name)
+                console.print(
+                    f"  [yellow]This block asked for '{name}', but no API key is "
+                    f"configured for it — running it on Anthropic instead.[/yellow]"
+                )
+                console.print(
+                    f"  [dim]Add one with `sandglass providers set {name}`.[/dim]"
+                )
+            logger.warning(
+                "Prompt %s requested provider %s with no key configured; "
+                "falling back to Anthropic", prompt.id, name,
+            )
+            return None
+        return provider, key
+
     async def _execute_with_rotation(self, prompt: PromptObject) -> Response:
         """Run one block, moving to the next account when quota runs out.
 
@@ -938,6 +1014,16 @@ class ExecutionEngine:
                 return await self.execute_prompt(prompt)
             except QuotaExceededError as exc:
                 if self.account_pool is None:
+                    raise
+                if self._resolve_provider(prompt) is not None:
+                    # A rate limit from a third-party endpoint says nothing
+                    # about any Claude subscription. Rotating here would mark a
+                    # perfectly healthy account as spent and park it for an
+                    # hour on the strength of someone else's quota.
+                    logger.info(
+                        "Prompt %s hit a rate limit on provider %s; not rotating "
+                        "Claude accounts", prompt.id, prompt.provider,
+                    )
                     raise
                 spent = self.account_pool.current_name
                 self.account_pool.mark_exhausted(exc.resets_at)
@@ -968,13 +1054,20 @@ class ExecutionEngine:
 
     async def execute_prompt(self, prompt: PromptObject) -> Response:
         """Send a single prompt to Claude Code with a live progress spinner."""
-        effective_model = prompt.model or self.claude_client.model
+        routed = self._resolve_provider(prompt)
+        effective_model = (
+            routed[0].resolve_model(prompt.model) if routed
+            else (prompt.model or self.claude_client.model)
+        )
         effective_effort = prompt.effort or self.claude_client.effort
 
         resume_session_id, persist_session = self._resolve_session(prompt)
         resuming = resume_session_id is not None
 
-        label = f"  📤 Sending to Claude ({effective_model}"
+        destination = f"Claude ({effective_model}" if not routed else (
+            f"{routed[0].name} ({effective_model}"
+        )
+        label = f"  📤 Sending to {destination}"
         if effective_effort:
             label += f", effort={effective_effort}"
         if resuming:
@@ -982,6 +1075,11 @@ class ExecutionEngine:
         elif not persist_session:
             label += ", isolated"
         console.print(label + ")...")
+        if routed:
+            console.print(
+                "  [dim]↗ external: this block's prompt, the project brief and "
+                f"any files it reads go to {routed[0].name}, not Anthropic.[/dim]"
+            )
 
         # A resumed session already carries the project brief in its history,
         # and already knows the previous task ended -- so a warm block needs a
@@ -1025,6 +1123,7 @@ class ExecutionEngine:
                     effort=prompt.effort,
                     resume_session_id=resume_session_id,
                     persist_session=persist_session,
+                    provider=routed,
                 )
             except QuotaExceededError as exc:
                 # A quota hit part-way through real work is the case resuming
@@ -1044,9 +1143,17 @@ class ExecutionEngine:
 
         response.prompt_id = prompt.id
         elapsed_min = (time.monotonic() - start) / 60
+        # On an external block the CLI still prices the run off Anthropic's
+        # table, because that is the only table it has -- so the figure is an
+        # order-of-magnitude stand-in, not a bill. Said out loud rather than
+        # printed as if it were money actually owed.
+        cost = (
+            f"${response.cost_usd:.2f}" if not routed
+            else f"~${response.cost_usd:.2f} at Anthropic rates, not {routed[0].name}'s"
+        )
         console.print(
             f"  ✅ Done ({response.tokens_used:,} tokens billed, "
-            f"${response.cost_usd:.2f}, {elapsed_min:.1f} min)"
+            f"{cost}, {elapsed_min:.1f} min)"
         )
 
         self._save_response(prompt, response)
@@ -1074,6 +1181,18 @@ class ExecutionEngine:
         from the response and resumes *that*, which is the only way the
         recorded session is guaranteed to be one that actually exists.
         """
+        if prompt.provider and self.allow_external:
+            # An externally-routed block never joins the chain, in either
+            # direction. Resuming would replay the whole accumulated Claude
+            # conversation — every file the queue has read so far — to a
+            # third-party endpoint, which is a far larger disclosure than the
+            # block's author agreed to. Letting the external turn *into* the
+            # chain is no better: subsequent Claude blocks would inherit
+            # another vendor's output as their own history. It costs a cold
+            # start, which is precisely what the block is being routed away
+            # from Anthropic to make cheap.
+            return None, False
+
         if self.session_mode == SESSION_MODE_ISOLATE or prompt.isolate:
             # `isolate: true` on a single block is the escape hatch for work
             # that must not inherit context: a review that shouldn't see the
@@ -1205,6 +1324,7 @@ class ExecutionEngine:
                 },
                 "cost_usd": response.cost_usd,
                 "session_id": prompt.session_id,
+                "provider": response.provider,
             }
             self.storage.save_json(path, payload)
         except OSError as exc:
@@ -1405,6 +1525,19 @@ class ExecutionEngine:
                 f"{result.total_cache_creation_tokens:,} written ({share:.0f}% reused)"
             )
         console.print(f"  ⏱️ {elapsed / 60:.1f} minutes")
+        external = [r for r in results if r.provider]
+        if external:
+            # The totals above mix two things the CLI cannot tell apart: real
+            # Anthropic cost, and an Anthropic-priced guess at what another
+            # vendor charged. Naming the split is the difference between a
+            # number someone can act on and one that just looks precise.
+            vendors = ", ".join(sorted({r.provider for r in external if r.provider}))
+            ext_tokens = sum(r.tokens_used for r in external)
+            console.print(
+                f"  ↗ {len(external)} block(s) ran on {vendors} "
+                f"({ext_tokens:,} tokens) — their share of the cost above is "
+                "estimated at Anthropic rates, not billed by Anthropic."
+            )
         if results:
             console.print("  what has been done:")
             for response in results:

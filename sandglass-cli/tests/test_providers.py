@@ -1,0 +1,244 @@
+"""External provider routing: marker parsing, key loading, and — above all —
+what does and does not end up in the subprocess environment."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from sandglass import providers
+from sandglass.accounts import TOKEN_ENV_VAR
+from sandglass.models import PromptObject
+from sandglass.queue_manager import QueueManager
+from sandglass.storage import StorageService
+
+
+@pytest.fixture
+def qm(tmp_path):
+    return QueueManager(storage=StorageService(base_path=str(tmp_path / ".sandglass")))
+
+
+# --- The environment handed to an external subprocess ---------------------
+#
+# This is the part with real consequences, so it is tested first and hardest.
+
+
+def test_subscription_token_is_stripped_from_an_external_call(monkeypatch):
+    """The single most important line in providers.py.
+
+    Left in place, a live Claude subscription credential would be sent to a
+    third-party server as a bearer token, and nothing in the run's output
+    would look wrong.
+    """
+    monkeypatch.setenv(TOKEN_ENV_VAR, "sk-ant-oat01-a-real-subscription-token")
+    env = providers.DEEPSEEK.subprocess_env("sk-deepseek-key")
+    assert TOKEN_ENV_VAR not in env
+
+
+def test_external_env_points_away_from_anthropic():
+    env = providers.DEEPSEEK.subprocess_env("sk-deepseek-key")
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-deepseek-key"
+    assert env["ANTHROPIC_API_KEY"] == "sk-deepseek-key"
+    # The housekeeping model has to be one the endpoint has heard of, or the
+    # CLI's own side calls fail against a vendor with no Claude models.
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "deepseek-v4-flash"
+
+
+def test_external_env_keeps_the_rest_of_the_environment(monkeypatch):
+    """The agent still has to be able to do work — PATH, HOME and the rest."""
+    monkeypatch.setenv("SOME_UNRELATED_VAR", "keep-me")
+    env = providers.DEEPSEEK.subprocess_env("sk-deepseek-key")
+    assert env["SOME_UNRELATED_VAR"] == "keep-me"
+    assert "PATH" in env
+
+
+# --- Model resolution -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "asked,expected",
+    [
+        ("pro", "deepseek-v4-pro"),
+        ("PRO", "deepseek-v4-pro"),
+        ("flash", "deepseek-v4-flash"),
+        ("opus", "deepseek-v4-pro"),       # a Claude tier name, mapped across
+        ("haiku", "deepseek-v4-flash"),
+        ("deepseek-v4-pro", "deepseek-v4-pro"),  # literal id, passed through
+        (None, "deepseek-v4-flash"),       # unstated -> the cheap one
+    ],
+)
+def test_resolve_model(asked, expected):
+    assert providers.DEEPSEEK.resolve_model(asked) == expected
+
+
+def test_an_unknown_model_name_is_forwarded_not_rejected():
+    """Model names are the vendor's to change; failing a block over one Sandglass
+    hasn't heard of would age badly."""
+    assert providers.DEEPSEEK.resolve_model("deepseek-v5-turbo") == "deepseek-v5-turbo"
+
+
+# --- Marker parsing -------------------------------------------------------
+
+
+def test_cline_marker_routes_the_block(qm):
+    prompt_id = qm.add_prompt(text="**CLINE: pro** — external-OK\n\nDo the thing.")
+    added = qm.get_prompt(int(prompt_id))
+    assert added.provider == "deepseek"
+    assert added.model == "deepseek-v4-pro"
+
+
+def test_external_marker_is_accepted_as_a_synonym(qm):
+    added = qm.get_prompt(int(qm.add_prompt(text="**EXTERNAL: flash**\n\nDo it.")))
+    assert added.provider == "deepseek"
+    assert added.model == "deepseek-v4-flash"
+
+
+def test_naming_the_provider_alone_takes_its_default_model(qm):
+    added = qm.get_prompt(int(qm.add_prompt(text="**CLINE: deepseek**\n\nDo it.")))
+    assert added.provider == "deepseek"
+    assert added.model == "deepseek-v4-flash"
+
+
+def test_provider_front_matter_beats_a_marker(qm):
+    text = "provider: deepseek\nmodel: deepseek-v4-pro\n\n**CLINE: flash**\n\nDo it."
+    added = qm.get_prompt(int(qm.add_prompt(text=text)))
+    assert added.provider == "deepseek"
+    assert added.model == "deepseek-v4-pro"
+
+
+def test_an_ordinary_block_never_leaves_anthropic(qm):
+    added = qm.get_prompt(int(qm.add_prompt(text="Add a badge to the editor.")))
+    assert added.provider is None
+
+
+def test_existing_external_ok_tier_markers_are_not_rerouted(qm):
+    """`**TIER: CHEAP - EXTERNAL-OK**` predates external routing and appears on
+    blocks written long before it existed. "EXTERNAL-OK" is the author granting
+    permission, not exercising it — treating the two as the same thing would
+    retroactively send a pile of old blocks to a third party on the strength of
+    a comment nobody wrote with that consequence in mind."""
+    added = qm.get_prompt(
+        int(qm.add_prompt(text="**TIER: CHEAP - EXTERNAL-OK** - a dirty-flag badge"))
+    )
+    assert added.provider is None
+    assert added.model == "haiku"
+
+
+def test_a_marker_buried_in_prose_is_not_front_matter(qm):
+    text = "Do the thing.\n\n" + ("filler. " * 60) + "\n**CLINE: pro**\n"
+    added = qm.get_prompt(int(qm.add_prompt(text=text)))
+    assert added.provider is None
+
+
+def test_no_tiers_disables_marker_routing(qm):
+    prompt_id = qm.add_prompt(text="**CLINE: pro**\n\nDo it.", use_tiers=False)
+    assert qm.get_prompt(int(prompt_id)).provider is None
+
+
+def test_provider_survives_a_queue_round_trip(qm):
+    qm.add_prompt(text="**CLINE: pro**\n\nDo it.")
+    reloaded = qm.load_queue()[0]
+    assert reloaded.provider == "deepseek"
+    assert PromptObject.from_dict(reloaded.to_dict()).provider == "deepseek"
+
+
+# --- Key loading ----------------------------------------------------------
+
+
+def test_missing_file_is_not_an_error(tmp_path, monkeypatch):
+    """Rotation off, providers off: a machine that never opted in is normal."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    registry = providers.ProviderRegistry.load(tmp_path / "nope.json")
+    assert registry.keys == {}
+    assert not registry.has("deepseek")
+
+
+def test_key_loads_from_either_file_shape(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    flat = tmp_path / "flat.json"
+    flat.write_text(json.dumps({"deepseek": {"api_key": "sk-flat-key-1234567890"}}))
+    nested = tmp_path / "nested.json"
+    nested.write_text(
+        json.dumps({"providers": {"deepseek": {"api_key": "sk-nested-key-123456"}}})
+    )
+    assert providers.ProviderRegistry.load(flat).key_for("deepseek") == "sk-flat-key-1234567890"
+    assert providers.ProviderRegistry.load(nested).key_for("deepseek") == "sk-nested-key-123456"
+
+
+def test_the_file_beats_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-from-the-environment")
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps({"deepseek": {"api_key": "sk-from-the-file-123456"}}))
+    assert providers.ProviderRegistry.load(path).key_for("deepseek") == "sk-from-the-file-123456"
+
+
+def test_environment_is_used_when_there_is_no_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-from-the-environment")
+    assert (
+        providers.ProviderRegistry.load(tmp_path / "nope.json").key_for("deepseek")
+        == "sk-from-the-environment"
+    )
+
+
+def test_a_malformed_file_is_an_error_not_a_silent_fallback(tmp_path, monkeypatch):
+    """Degrading quietly would surface hours later as a block that ran on Claude
+    when it was meant to run somewhere cheap — the hardest way to notice a typo."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text("{not json")
+    with pytest.raises(providers.ProvidersError):
+        providers.ProviderRegistry.load(path)
+
+
+def test_an_entry_with_no_key_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps({"deepseek": {}}))
+    with pytest.raises(providers.ProvidersError):
+        providers.ProviderRegistry.load(path)
+
+
+def test_an_unknown_provider_in_the_file_is_ignored_not_fatal(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text(
+        json.dumps({
+            "some-future-vendor": {"api_key": "sk-whatever-1234567890"},
+            "deepseek": {"api_key": "sk-real-key-1234567890"},
+        })
+    )
+    registry = providers.ProviderRegistry.load(path)
+    assert registry.key_for("deepseek") == "sk-real-key-1234567890"
+    assert registry.key_for("some-future-vendor") is None
+
+
+# --- Key hygiene ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key,expected",
+    [
+        ("sk-" + "a" * 30, None),
+        ("", "empty"),
+        ("   ", "empty"),
+        ("sk-abc…", "ellipsis"),
+        ("sk-abc...", "ellipsis"),
+        ("sk-abc def ghi jkl mno", "whitespace"),
+        ("sk-short", "characters"),
+    ],
+)
+def test_looks_malformed(key, expected):
+    problem = providers.looks_malformed(key)
+    if expected is None:
+        assert problem is None
+    else:
+        assert problem is not None and expected in problem
+
+
+def test_get_is_case_insensitive_and_safe_on_nonsense():
+    assert providers.get("DeepSeek") is providers.DEEPSEEK
+    assert providers.get("not-a-vendor") is None
+    assert providers.get(None) is None
+    assert providers.get("") is None

@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 from .accounts import subprocess_env
 from .models import Response
+from .providers import Provider
 
 logger = logging.getLogger(__name__)
 
@@ -163,12 +164,18 @@ class ClaudeClient:
         effort: Optional[str] = None,
         resume_session_id: Optional[str] = None,
         persist_session: bool = True,
+        provider: Optional[tuple[Provider, str]] = None,
         _retried: bool = False,
     ) -> Response:
         """Run ``text`` through `claude -p`, streaming the reply.
 
         ``model``/``effort`` override the client defaults for just this call
-        (used for per-prompt overrides from the queue). Calls
+        (used for per-prompt overrides from the queue). ``provider`` is a
+        ``(Provider, api_key)`` pair that redirects this one call to a
+        non-Anthropic endpoint — it replaces the account pool's environment
+        entirely rather than layering on it, because the two are mutually
+        exclusive by construction: the subscription token has to be *absent*
+        from an external call (see providers.Provider.subprocess_env). Calls
         ``on_chunk(text_piece)`` for each streamed text delta (for live
         progress) and returns a fully accumulated :class:`Response`. Raises
         :class:`QuotaExceededError` if Claude Code reports the subscription's
@@ -199,10 +206,17 @@ class ClaudeClient:
 
         effective_model = self._normalize_model(model) if model else self.model
         effective_effort = effort or self.effort
+        if provider is not None:
+            # Never fall back to `self.model` here: a Claude model id sent to a
+            # third-party endpoint is silently remapped to whatever that vendor
+            # considers equivalent, so the run would quietly get a model nobody
+            # chose. The provider resolves its own default instead.
+            effective_model = provider[0].resolve_model(model)
 
         logger.info(
-            "Sending prompt to Claude Code CLI (model=%s, effort=%s, chars=%d, "
-            "permission_mode=%s, session=%s)",
+            "Sending prompt to Claude Code CLI (provider=%s, model=%s, effort=%s, "
+            "chars=%d, permission_mode=%s, session=%s)",
+            provider[0].name if provider else "anthropic",
             effective_model, effective_effort or "default", len(text),
             self.permission_mode,
             f"resuming {resume_session_id}" if resume_session_id
@@ -242,9 +256,14 @@ class ClaudeClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=STREAM_BUFFER_LIMIT,
-            # None when not rotating -- the subprocess then inherits this
-            # process's environment exactly as it always has.
-            env=subprocess_env(self.auth_token),
+            # None when not rotating and not routed externally -- the
+            # subprocess then inherits this process's environment exactly as
+            # it always has.
+            env=(
+                provider[0].subprocess_env(provider[1])
+                if provider is not None
+                else subprocess_env(self.auth_token)
+            ),
         )
 
         pieces: list[str] = []
@@ -341,7 +360,8 @@ class ClaudeClient:
                 )
                 return await self.send_prompt(
                     text, on_chunk, model=model, effort=effort,
-                    resume_session_id=None, persist_session=True, _retried=True,
+                    resume_session_id=None, persist_session=True,
+                    provider=provider, _retried=True,
                 )
             raise RuntimeError(error_text)
 
@@ -353,6 +373,7 @@ class ClaudeClient:
             cost_usd=final_result.get("total_cost_usd") or 0.0,
         )
         response.session_id = final_result.get("session_id") or observed_session_id
+        response.provider = provider[0].name if provider else None
         logger.info(
             "Received response from Claude Code CLI (billed=%d tokens "
             "[in=%d out=%d cache_write=%d cache_read=%d], cost=$%.4f)",

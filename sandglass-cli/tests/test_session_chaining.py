@@ -53,12 +53,14 @@ class _RecordingClient:
         return len(text) // 4
 
     async def send_prompt(self, text, on_chunk=None, model=None, effort=None,
-                          resume_session_id=None, persist_session=True):
+                          resume_session_id=None, persist_session=True,
+                          provider=None):
         self.calls.append(
             {
                 "text": text,
                 "resume_session_id": resume_session_id,
                 "persist_session": persist_session,
+                "provider": provider,
             }
         )
         if self.fail_on and self.fail_on in text:
@@ -260,7 +262,8 @@ def test_a_quota_hit_mid_block_still_records_its_session(qm):
 
     class _QuotaAfterSessionClient(_RecordingClient):
         async def send_prompt(self, text, on_chunk=None, model=None, effort=None,
-                              resume_session_id=None, persist_session=True):
+                              resume_session_id=None, persist_session=True,
+                              provider=None):
             self.calls.append(
                 {"text": text, "resume_session_id": resume_session_id,
                  "persist_session": persist_session}
