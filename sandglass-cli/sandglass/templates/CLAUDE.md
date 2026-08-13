@@ -250,12 +250,31 @@ stands against its own plan, then record it. Do all three:
    supposed to be (its components and Implementation Phases). Judge how much of
    that is actually built vs still pending. This is the qualitative half: *are
    we building the right thing, and how far along the plan are we?*
-2. **Prompt throughput.** Count the `====`-delimited blocks still queued in
-   `prompt_tools/future_prompts.md` (remaining) and the executed entries in
-   `prompt_tools/prompt_history.md` (done). Report done, remaining, total, and a
-   percentage — e.g. `16 done / 1 remaining (17 total, 94%)`. These are the two
-   ends of one pipeline: a block leaves `future_prompts.md` and lands in
-   `prompt_history.md` when it completes (see the "future prompts" trigger).
+2. **Prompt throughput — run the script, never count by eye or by grep.**
+
+   ```bash
+   python prompt_tools/count_blocks.py     # exits non-zero if an invariant is broken
+   ```
+
+   It prints done, remaining, total, the percentage (rounded **down**), the
+   per-phase split, the next block, and a FORECAST panel. Paste what it prints.
+   These are the two ends of one pipeline: a block leaves `future_prompts.md`
+   and lands in `prompt_history.md` when it completes (see the "future prompts"
+   trigger).
+
+   **Do not replace it with a grep.** The grep it exists to kill counted
+   `### P<id>` headings anywhere in `prompt_history.md` — including inside the
+   fenced code block where a `## [Sandglass work]` entry legitimately quotes
+   the prompt it ran. A quoted heading is not a completion, and neither is a
+   `[VOIDED]` one. In the project this came from, three blocks were reported
+   as finished for four days while their files were still placeholders, and
+   they silently fell out of the queue.
+
+   **If the script exits non-zero, say so out loud** and put its output in the
+   dashboard's WARNINGS panel. It fails when a block id is listed in *both*
+   files (it could execute twice) or when a block depends on something later
+   in the queue. A silent green dashboard over a broken invariant is worse
+   than no dashboard.
 3. **Check the reading budget.** If `work_log.md` holds more than ~10 entries,
    run `sandglass rotate-logs` — every future task is paying to read whatever
    is in there. Mention it in the report either way.
@@ -265,6 +284,21 @@ stands against its own plan, then record it. Do all three:
    noise. Keep it short: the master-plan standing, the prompt counts, and any
    blocker worth flagging. `Progress.md` is the at-a-glance status file — it is
    NOT the work_log (that stays the per-task narrative in `work_log.md`).
+
+   **Keep its first screen intact.** Status box → OVERALL bar → PHASES table →
+   FORECAST, in that order and *adjacent*. Narrative and warnings go below.
+   Dropping a paragraph between the bars and the forecast is the one edit that
+   breaks the file's only job, and it is the edit everyone makes.
+
+   **The FORECAST carries three estimates and averages none of them**: a
+   trailing 3-day velocity, that velocity scaled by the remaining effort mix,
+   and `ROADMAP.md`'s own bottom-up week ranges. Velocity is a **moving
+   window, never a project-lifetime average** — a lifetime average keeps
+   crediting week-one scaffolding speed against week-three work and can never
+   fall, so it flatters the finish date forever. When nothing has been cut
+   inside the window the panel prints **STALLED and no date**. That is correct
+   behaviour, not a bug: no recent throughput is no basis for a date. Quote
+   the spread; never quote one date as "the" date.
 
 ## Session shutdown ritual — "may the force be with you"
 

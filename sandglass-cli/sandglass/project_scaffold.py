@@ -1,11 +1,20 @@
 """Scaffolds a new project's Claude Code setup from bundled templates.
 
-Templates live in ``sandglass/templates/``: a ``CLAUDE.md`` file (copied
-verbatim) plus ``master_plan/`` and ``prompt_tools/`` directories whose
-filenames are reproduced as empty files in the target project. `claude-md
--update` overwrites the bundled ``CLAUDE.md`` in place, so the next
-`new-claude-project` run picks up whatever the current project's CLAUDE.md
-says.
+Templates live in ``sandglass/templates/``: a ``CLAUDE.md`` file plus
+``master_plan/`` and ``prompt_tools/`` directories.
+
+**A template file with content is copied; an empty one is created empty.**
+That split is deliberate. Most of these files are the project's own words --
+its architecture, its work log, its queue -- and pre-filling them with prose
+someone has to delete first is worse than an empty file. But two of them are
+scaffolding rather than content: ``Progress.md`` (a dashboard whose shape is
+the point) and ``count_blocks.py`` (the script that generates its numbers).
+Shipping those as 0-byte files means every project reinvents them, and the
+bundled ``CLAUDE.md`` already tells the agent they exist.
+
+``claude-md-update`` overwrites the bundled ``CLAUDE.md`` in place, so the
+next ``new-claude-project`` run picks up whatever the current project's
+CLAUDE.md says.
 """
 
 from __future__ import annotations
@@ -28,10 +37,12 @@ class ScaffoldResult:
 def new_claude_project(target_dir: str = ".") -> ScaffoldResult:
     """Create CLAUDE.md, master_plan/, and prompt_tools/ under ``target_dir``.
 
-    CLAUDE.md is copied with its template content; files under master_plan/
-    and prompt_tools/ are created empty (only their names come from the
-    template). Anything that already exists at the target path is left
-    untouched and reported as skipped.
+    CLAUDE.md is copied with its template content. Under master_plan/ and
+    prompt_tools/, a template that has content is copied and one that is
+    empty contributes only its filename -- see the module docstring for why
+    the split exists. Anything that already exists at the target path is left
+    untouched and reported as skipped, so re-running this never overwrites a
+    project's own work.
     """
     if not os.path.isfile(TEMPLATE_CLAUDE_MD):
         raise FileNotFoundError(f"Bundled template not found: {TEMPLATE_CLAUDE_MD}")
@@ -46,11 +57,15 @@ def new_claude_project(target_dir: str = ".") -> ScaffoldResult:
         dest_dir = os.path.join(target_dir, dirname)
         os.makedirs(dest_dir, exist_ok=True)
         for filename in sorted(os.listdir(src_dir)):
+            src_path = os.path.join(src_dir, filename)
             dest_path = os.path.join(dest_dir, filename)
             if os.path.exists(dest_path):
                 result.skipped.append(dest_path)
                 continue
-            open(dest_path, "a", encoding="utf-8").close()
+            if os.path.getsize(src_path) > 0:
+                shutil.copyfile(src_path, dest_path)
+            else:
+                open(dest_path, "a", encoding="utf-8").close()
             result.created.append(dest_path)
 
     return result

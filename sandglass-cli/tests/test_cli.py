@@ -112,10 +112,25 @@ def test_new_claude_project_creates_claude_md_and_template_folders():
     assert set(os.listdir("master_plan")) == expected_master_plan
     assert set(os.listdir("prompt_tools")) == expected_prompt_tools
 
-    for filename in expected_master_plan:
-        assert os.path.getsize(os.path.join("master_plan", filename)) == 0
-    for filename in expected_prompt_tools:
-        assert os.path.getsize(os.path.join("prompt_tools", filename)) == 0
+    # A template with content is copied; an empty one contributes only its filename. Files a
+    # project must write in its own words (architecture, system map, manual) stay empty, because
+    # prose someone has to delete first is worse than a blank page. Scaffolding whose SHAPE is
+    # the deliverable -- the dashboard and the script that generates its numbers -- ships filled
+    # in, or every project reinvents it while CLAUDE.md insists it already exists.
+    for dirname, filenames in (
+        ("master_plan", expected_master_plan),
+        ("prompt_tools", expected_prompt_tools),
+    ):
+        for filename in filenames:
+            src = os.path.join(project_scaffold.TEMPLATES_DIR, dirname, filename)
+            dest = os.path.join(dirname, filename)
+            if os.path.getsize(src) > 0:
+                with open(src, encoding="utf-8") as fh:
+                    expected = fh.read()
+                with open(dest, encoding="utf-8") as fh:
+                    assert fh.read() == expected, f"{dest} should carry its template content"
+            else:
+                assert os.path.getsize(dest) == 0, f"{dest} should be created empty"
 
 
 def test_new_claude_project_skips_files_that_already_exist():
