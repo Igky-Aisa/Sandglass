@@ -128,3 +128,21 @@
 - Neither progress-milestone tests nor the notify-consolidation tests have run against a real overnight batch yet — only fakes. Worth watching the first real multi-account, multi-hour run for: milestone spacing looking sane on an uneven queue (blocks of very different sizes won't land on clean 5% lines the way the tests' evenly-sized fixtures do), and no unexpected double-pushes.
 - The artifact gate's own inline `dirname(abspath(origin_file))` pattern (two call sites in `execute_queue`) still has the same one-level imprecision `_project_dir` had — currently harmless because `git` resolves its own root regardless of `cwd`, but that safety is accidental, not designed. If the gate is ever touched for another reason, route it through the now-fixed `_project_dir` instead of leaving three places computing directory logic independently (two of them still imprecise).
 - **Process note, caught before it shipped, worth repeating so it doesn't recur:** `Glob` reported "No files found" for `tests/test_prompt_source.py` and `tests/test_project_docs.py`, which do not actually match anything under `.gitignore` or any exclusion — they were real, committed files with real coverage (`parse_blocks`, `cut_first_block`, `build_brief`, `rotate_log`, etc.) since `0d12901`. Trusting that result, I `Write`-created "new" files with those exact names, silently overwriting both. Caught only because `git status` showed `M` instead of `??` right before committing — a signal that should always be checked when a file believed new is about to be committed. Fixed by restoring both from git history and merging the new tests in rather than replacing. **Lesson: a negative search result is not proof a file doesn't exist — `git status`/`ls` the exact path before `Write`-ing anything with a name you didn't verify by reading first.**
+
+## 2026-08-14 - Opus 5 - The artifact gate was archiving refusals as successes
+
+### 1. Context Snapshot
+- **Goal**: Explain why one class of stop keeps recurring in Azymetrix, and fix the cause.
+- **State**: `sandglass-cli/sandglass/workspace.py` (`_IGNORED_FILES`), `execution_engine.py` (`_ask_why_nothing_changed`), `CLAUDE.md` + template.
+- **Previous Blocker**: Resolved. The recursion the user suspected is real and now evidenced.
+
+### 2. Work Done
+- **Root cause: a mandated `work_log.md` entry counted as a work product.** CLAUDE.md tells every task to log a session report — including a task that refuses. The gate ignored only `.sandglass/`, so the refusal's own log entry proved "work happened", and the block was cut and archived as executed. Evidence: Azymetrix `response_003.json` opens "P6.08 is **BLOCKED**. I made no code changes", yet P6.08 is in `prompt_history.md` and gone from `future_prompts.md`, with the incriminating log write at `work_log.md:6007`.
+- **Why it compounds**: every refusal deletes a block from the plan and adds a false "done", so dependents refuse later and are archived the same way. That project had already lost and restored P1.17/P2.06/P2.07 to this.
+- **Excluded four named files, not `master_plan/` wholesale** — that directory also holds architecture docs, and a block whose job is editing one has genuinely delivered. The distinction has its own test.
+- **The DONE/BLOCKED/NOOP question never fired on that queue**: 28 of 30 blocks were externally routed, which runs cold by design, and the recovery required a session to resume. Cold blocks now get the question with block text and response attached, without opening a session of their own.
+- Wrote `C:\Codes\Azymetrix\prompt_tools\audit_orphaned_blocks.md` — a standalone (deliberately un-queued) block that audits `prompt_history.md` against the repo and reports blocks archived as done but never built.
+
+### 3. Next Steps (For the next agent)
+- **The already-orphaned blocks are still orphaned.** The fix stops new ones; run the audit prompt above to find the existing ones. Restore dependencies before dependents.
+- Block 002 of that run billed **53M tokens / 30 min** for one SONNET-tier block, 100% cache read, zero cache write. Nothing explains that yet and it dwarfs every other cost in the project. Worth a look before the next long batch.

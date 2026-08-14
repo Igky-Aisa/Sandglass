@@ -71,8 +71,36 @@ def _run_git(args: list[str], cwd: str | None = None) -> str | None:
 # precisely the files the refusing runs left behind in the incident this module fixes.
 _IGNORED_PREFIXES = (".sandglass/",)
 
+# The project's OWN bookkeeping files — the ones its CLAUDE.md tells every task
+# to write. These are excluded for the same reason as `.sandglass/`: a file the
+# process mandates cannot be evidence that the process produced anything.
+#
+# This is not a hypothetical either, and it is worse than the `.sandglass/` case
+# because it inverts the gate on exactly the runs it exists to catch. A block
+# that cannot do its work writes a work-log entry explaining why it is blocked —
+# obeying the convention — and that write made the gate see a "work product", so
+# the block was cut from `future_prompts.md` and archived into
+# `prompt_history.md` as executed. Observed live: a P6.08 block whose own
+# response opens "P6.08 is **BLOCKED**. I made no code changes" was archived as
+# complete, with a matching work-log entry, having built nothing.
+#
+# That is self-reinforcing. Every refusal deletes a block from the plan and adds
+# a false "done" to the history, so the blocks that depend on it later arrive to
+# find their dependency missing, refuse in turn, and are archived the same way.
+# The queue drifts further from the repo with every run.
+#
+# Matched as whole paths, not prefixes: `master_plan/` also holds architecture
+# docs, and a block whose whole job is editing one of those has genuinely
+# produced its deliverable.
+_IGNORED_FILES = (
+    "master_plan/work_log.md",
+    "master_plan/progress.md",
+    "prompt_tools/prompt_history.md",
+    "prompt_tools/future_prompts.md",
+)
 
-def _is_ignored(path: str) -> bool:
+
+def _normalize(path: str) -> str:
     # NB: a leading "./" is stripped as a *prefix*, not with lstrip("./") — that
     # strips characters, turning ".sandglass/" into "sandglass/" and quietly
     # defeating the whole exclusion. Git reports an untracked directory as
@@ -80,7 +108,16 @@ def _is_ignored(path: str) -> bool:
     normalized = path.replace("\\", "/")
     if normalized.startswith("./"):
         normalized = normalized[2:]
-    return normalized.startswith(_IGNORED_PREFIXES)
+    return normalized
+
+
+def _is_ignored(path: str) -> bool:
+    normalized = _normalize(path)
+    if normalized.startswith(_IGNORED_PREFIXES):
+        return True
+    # Case-insensitive on the filename: `Progress.md` and `progress.md` are the
+    # same file on Windows and both spellings appear in real projects.
+    return normalized.lower() in _IGNORED_FILES
 
 
 def _status_entries(status: str) -> list[tuple[str, str]]:

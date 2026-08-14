@@ -253,3 +253,23 @@ def test_the_right_block_is_cut_when_an_earlier_one_was_left_behind(project):
     remaining = open(source, encoding="utf-8").read()
     assert "P1 — first thing" in remaining, "the left-behind block must survive"
     assert "P2 — second thing" not in remaining, "the completed one must be cut"
+
+
+def test_a_cold_block_is_still_asked_why(project):
+    """Observed on a 30-block run: 28 blocks were routed externally, so they ran
+    cold, the chain never opened, and the stop was reported with no verdict at
+    all — the recovery skipped exactly the queue that needed it. A block with no
+    session to resume now gets the same question with the evidence attached."""
+    qm, _ = _queue(project)
+    client = _Client(verdict="BLOCKED", why="P0 was never built")
+
+    asyncio.run(
+        ExecutionEngine(qm, client, session_mode="isolate").execute_queue()
+    )
+
+    asked = [t for t in client.sent if "VERDICT:" in t]
+    assert asked, "a cold block must still be asked"
+    # It cannot remember the refusal, so the question has to carry it.
+    assert "WHAT IT ANSWERED" in asked[0]
+    assert "I changed nothing." in asked[0]
+    assert BLOCK_A.strip() in asked[0]

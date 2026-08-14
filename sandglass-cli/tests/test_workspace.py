@@ -135,3 +135,62 @@ def test_status_entries_handles_renames_and_quoting():
     assert "new.py" in paths, "a rename should register its destination"
     assert "new file.txt" in paths
     assert not any(p.startswith(".sandglass") for p in paths)
+
+
+def test_a_work_log_entry_alone_is_not_a_work_product(repo):
+    """The failure this exclusion exists for, seen live.
+
+    A block that cannot do its job writes a work-log entry saying why — the
+    project's CLAUDE.md mandates one for every task. That write used to satisfy
+    the artifact gate, so the block was cut from `future_prompts.md` and
+    archived into `prompt_history.md` as executed, having built nothing. A
+    P6.08 block whose own response opens "P6.08 is **BLOCKED**. I made no code
+    changes" was archived exactly this way.
+
+    It is self-reinforcing: every refusal deletes a block from the plan and adds
+    a false "done" to the history, so its dependents later arrive to find the
+    dependency missing and refuse in turn.
+    """
+    (repo / "master_plan").mkdir()
+    (repo / "master_plan" / "work_log.md").write_text("# Work Log\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "work log")
+
+    before = workspace.workspace_fingerprint(cwd=str(repo))
+    # The refusing block does exactly what the convention asks of it.
+    with open(repo / "master_plan" / "work_log.md", "a", encoding="utf-8") as fh:
+        fh.write("\n## 2026-08-14 - agent - P6.08 BLOCKED, no code changes\n")
+    after = workspace.workspace_fingerprint(cwd=str(repo))
+
+    assert workspace.produced_work_product(before, after) is False
+
+
+def test_the_queue_files_themselves_are_not_a_work_product(repo):
+    """Cutting a block edits both queue files; that is the run's bookkeeping,
+    not its output."""
+    (repo / "prompt_tools").mkdir()
+    (repo / "prompt_tools" / "future_prompts.md").write_text("block\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "queue")
+
+    before = workspace.workspace_fingerprint(cwd=str(repo))
+    (repo / "prompt_tools" / "prompt_history.md").write_text("archived\n", encoding="utf-8")
+    (repo / "prompt_tools" / "future_prompts.md").write_text("", encoding="utf-8")
+    after = workspace.workspace_fingerprint(cwd=str(repo))
+
+    assert workspace.produced_work_product(before, after) is False
+
+
+def test_a_real_doc_deliverable_still_counts(repo):
+    """The exclusion is four named files, not `master_plan/` wholesale — a block
+    whose job is editing the architecture doc has produced its deliverable."""
+    (repo / "master_plan").mkdir()
+    (repo / "master_plan" / "ARCHITECTURE.md").write_text("v1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "arch")
+
+    before = workspace.workspace_fingerprint(cwd=str(repo))
+    (repo / "master_plan" / "ARCHITECTURE.md").write_text("v2\n", encoding="utf-8")
+    after = workspace.workspace_fingerprint(cwd=str(repo))
+
+    assert workspace.produced_work_product(before, after) is True

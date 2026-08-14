@@ -247,6 +247,47 @@ When I say **"future prompts all"**
 > If a task genuinely requires changing the queue, say so in your response and leave the files
 > alone.
 
+### The two queues — `future_prompts.md` and `.sandglass/queue.json`
+
+`sandglass` keeps its own **snapshot** of the queue in `.sandglass/queue.json`, taken when it
+first imports the markdown. Editing `future_prompts.md` does **not** update that snapshot, so
+the two drift apart and the run executes block text that no longer exists.
+
+- **Whoever edits `future_prompts.md` runs `sandglass queue clear` in the same task**, so the
+  next `sandglass execute` re-imports the current text. Clearing loses nothing: the blocks live
+  in the markdown, and the queue is only ever a copy of them.
+- Sandglass drops a queued block that is **gone from `future_prompts.md` and present in
+  `prompt_history.md`** — someone else already ran it. That is a repair for one specific
+  divergence, not a substitute for clearing: a stale snapshot still holds *old text* for blocks
+  that are still listed.
+- **`sandglass why`** explains why the last run stopped (or what it is doing now). Read it
+  before re-running anything.
+
+### If your block changes no file, you will be asked why
+
+A block that returns a response but changes nothing in the working tree gets one follow-up turn.
+Answer in exactly this shape:
+
+```
+VERDICT: DONE | BLOCKED | NOOP
+WHY: <one line>
+```
+
+`DONE` = the work was already complete before you started. `BLOCKED` = you could not do it;
+name precisely what is missing. `NOOP` = the task genuinely required no file change.
+
+`DONE` and `NOOP` let the queue move on to the next block; `BLOCKED` stops it. **Answer
+accurately rather than agreeably** — a block that says `NOOP` to be helpful sends the queue past
+a real missing dependency, and the blocks behind it will fail for reasons nobody can see.
+Nothing is ever cut on the strength of that answer; it decides whether the run continues, never
+whether a block is destroyed.
+
+**Writing a `work_log.md` entry is not a work product.** The log, `Progress.md` and both
+`prompt_tools/` files are excluded from that check on purpose: they are what this process
+mandates, so they cannot be evidence that the process produced anything. Recording *why* you
+were blocked is still correct and still expected — it just won't be mistaken for having built
+the block.
+
 
 ## "check progress" trigger — measure against the master plan
 

@@ -113,6 +113,14 @@ REFUSAL_QUERY = (
     "  BLOCKED — you could not do it; name precisely what is missing.\n"
     "  NOOP    — you did the task and it genuinely required no file changes.\n"
 )
+# Appended when there is no session to resume, so the question carries its own
+# evidence instead of assuming a memory the callee doesn't have.
+REFUSAL_EVIDENCE = (
+    "\nYou have no memory of this: it happened in a different session. Judge it "
+    "from the record below, and from the repository as it stands now.\n\n"
+    "--- THE BLOCK THAT WAS ASKED FOR ---\n{block}\n\n"
+    "--- WHAT IT ANSWERED ---\n{response}\n"
+)
 _VERDICT_RE = re.compile(r"VERDICT:\s*(DONE|BLOCKED|NOOP)", re.IGNORECASE)
 _WHY_RE = re.compile(r"WHY:\s*(.+)", re.IGNORECASE)
 
@@ -603,7 +611,7 @@ class ExecutionEngine:
                         "  [red]✖ No work product: the response changed no file "
                         "in the working tree.[/red]"
                     )
-                    verdict, why = await self._ask_why_nothing_changed(prompt)
+                    verdict, why = await self._ask_why_nothing_changed(prompt, response)
 
                     # DONE and NOOP both mean "there was nothing to write here",
                     # so the queue can keep moving. The block is still NOT cut:
@@ -881,7 +889,7 @@ class ExecutionEngine:
             )
 
     async def _ask_why_nothing_changed(
-        self, prompt: PromptObject
+        self, prompt: PromptObject, response: Response
     ) -> tuple[str | None, str]:
         """Ask the run that just wrote nothing which of three things happened.
 
@@ -901,22 +909,36 @@ class ExecutionEngine:
             return None, ""
 
         session_id, persist = self._resolve_session(prompt)
-        if not session_id:
-            # Nothing to resume: the question would land in a fresh session with
-            # no memory of the refusal, so it could only guess. Don't pay for that.
-            return None, ""
+
+        # Plenty of blocks have no session to resume: every externally routed
+        # block runs cold by design, and so does any block whose predecessors
+        # were all external. Asking only warm blocks would mean the recovery
+        # never fires on precisely the queues that stop most often -- observed
+        # on a 30-block run where 28 blocks were external, the chain never
+        # opened, and the stop was reported with no verdict at all. A cold
+        # block gets the same question with the evidence attached instead.
+        if session_id:
+            query = REFUSAL_QUERY
+        else:
+            query = REFUSAL_QUERY + REFUSAL_EVIDENCE.format(
+                block=prompt.text.strip()[:2000],
+                response=(response.text or "").strip()[:4000],
+            )
 
         console.print("  [dim]Asking why nothing changed…[/dim]")
         try:
             reply = await self.claude_client.send_prompt(
-                REFUSAL_QUERY,
+                query,
                 # Never `prompt.model` raw: this question always goes to the
                 # Anthropic session that just refused, so a provider's model
                 # name would name something that endpoint has never heard of.
                 model=self._model_for(prompt, None),
                 effort="low",
                 resume_session_id=session_id,
-                persist_session=persist,
+                # A cold question must not open a session of its own: it would
+                # become the chain the next block joins, handing it a
+                # classification exchange as its entire project history.
+                persist_session=persist and bool(session_id),
             )
         except Exception as exc:  # noqa: BLE001 — a failed question must not mask the refusal
             logger.warning("Could not ask prompt %s why nothing changed: %s", prompt.id, exc)
