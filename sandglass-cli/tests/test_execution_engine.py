@@ -10,17 +10,20 @@ from sandglass.execution_engine import (
     WORK_LOG_PATH,
     ExecutionEngine,
     _BANNER_FONT,
+    _BANNER_GAP,
     _BANNER_SIGNATURE,
     _BANNER_TEXT,
     _BOTTOM_CELLS,
     _CYCLE_TICKS,
     _HOURGLASS_HALF,
+    _HOURGLASS_ROWS,
     _HOURGLASS_WIDTH,
     _PROGRESS_UNITS,
     _ROW_CELLS,
     _TICKS_PER_UNIT,
     _TOP_SUBSTEPS,
     _hourglass_frame,
+    _pad_to_height,
     _render_banner,
 )
 from sandglass.models import Response
@@ -552,6 +555,35 @@ def test_render_banner_is_deterministic():
 def test_the_signature_names_the_project_and_the_author():
     assert "Sandglass" in _BANNER_SIGNATURE
     assert "Igky Aisa" in _BANNER_SIGNATURE
+
+
+def test_pad_to_height_centers_a_shorter_block():
+    """The banner (5 rows) sits beside the hourglass (9 rows); without
+    centering it would hug the top of the row instead of sitting beside the
+    glass's visual middle."""
+    padded = _pad_to_height(["AB", "CD"], 6)
+    assert padded == ["  ", "  ", "AB", "CD", "  ", "  "]
+
+
+def test_pad_to_height_puts_the_odd_row_on_the_bottom():
+    padded = _pad_to_height(["X"], 4)
+    assert padded == [" ", "X", " ", " "]
+
+
+def test_pad_to_height_is_a_noop_at_the_target_height():
+    assert _pad_to_height(["AB", "CD"], 2) == ["AB", "CD"]
+
+
+def test_the_banner_beside_the_hourglass_never_wraps_an_80_column_terminal():
+    """Real bug caught before it shipped: appending the countdown caption to
+    the hourglass's neck row (as the standalone frame does) pushed the widest
+    combined row past 80 columns and wrapped mid-frame in an ordinary
+    terminal, breaking the box shape. The composed row -- banner, gap, plain
+    hourglass, no caption -- must stay well under that."""
+    banner_rows = _pad_to_height(_render_banner(_BANNER_TEXT).split("\n"), _HOURGLASS_ROWS)
+    frame_rows = _hourglass_frame(0).split("\n")
+    widest = max(len(b) + len(_BANNER_GAP) + len(f) for b, f in zip(banner_rows, frame_rows))
+    assert widest < 80
 
 
 def test_sleep_with_animation_waits_the_full_duration_and_prints_start_end(qm, capsys):

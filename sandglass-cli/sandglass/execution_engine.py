@@ -162,6 +162,7 @@ ACCOUNTING_SCHEMA = 2
 _HOURGLASS_WIDTH = 7
 _HOURGLASS_HALF = 3  # rows per triangle half -- animation is 9 lines total
 # (rounded cap + 3 top + neck + 3 bottom + rounded cap), a compact block.
+_HOURGLASS_ROWS = 2 * _HOURGLASS_HALF + 3  # cap + half + neck + half + cap
 # Interior width of each cone row, widest first: (5, 3, 1) at width 7. The
 # top drains and the bottom fills in that same order -- widest row first --
 # so the two halves hold exactly the same amount of sand and the pour is
@@ -204,14 +205,33 @@ _BANNER_FONT: dict[str, tuple[str, str, str, str, str]] = {
     "G": (" ████", "█    ", "█  ██", "█   █", " ████"),
     "L": ("█    ", "█    ", "█    ", "█    ", "█████"),
 }
-# The tagline shown under the banner while waiting.
+# The tagline shown under the banner+hourglass row while waiting.
 _BANNER_SIGNATURE = "Sandglass is an open-source CLI app for developers, by Igky Aisa."
+# Columns between the banner and the hourglass when they sit side by side.
+_BANNER_GAP = "   "
 
 
 def _render_banner(word: str) -> str:
     """The word rendered in :data:`_BANNER_FONT`, one letter beside the next."""
     glyphs = [_BANNER_FONT[ch] for ch in word]
     return "\n".join(" ".join(g[row] for g in glyphs) for row in range(5))
+
+
+def _pad_to_height(lines: list[str], height: int) -> list[str]:
+    """Vertically center a block of equal-width lines inside ``height`` rows.
+
+    Padding is blank lines the same width as the block, split as evenly as
+    possible above and below (any odd row goes to the bottom). Exists because
+    the banner (5 rows) and the hourglass (:data:`_HOURGLASS_ROWS`, 9) sit side
+    by side and don't share a height on their own -- without this the shorter
+    block would hug the top of the row and look pinned above the glass rather
+    than beside it.
+    """
+    width = len(lines[0]) if lines else 0
+    blank = " " * width
+    pad_top = max(0, (height - len(lines)) // 2)
+    pad_bottom = max(0, height - len(lines) - pad_top)
+    return [blank] * pad_top + list(lines) + [blank] * pad_bottom
 
 
 # Fails fast at import if a glyph's rows ever drift out of alignment, rather
@@ -957,9 +977,11 @@ class ExecutionEngine:
             "Press Ctrl-C to stop (queue stays intact).[/yellow]"
         )
 
-        # Built once, not per frame -- the banner and signature are static, so
-        # only the hourglass underneath them needs to be redrawn every tick.
-        banner = _render_banner(_BANNER_TEXT)
+        # Built once, not per frame -- the banner is static, and it is always
+        # centered against the hourglass's fixed height (_HOURGLASS_ROWS never
+        # changes tick to tick), so both the render and the centering only
+        # need to happen once rather than on every 0.5s redraw.
+        banner_rows = _pad_to_height(_render_banner(_BANNER_TEXT).split("\n"), _HOURGLASS_ROWS)
 
         deadline = time.monotonic() + total_seconds
         tick = 0
@@ -968,11 +990,23 @@ class ExecutionEngine:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                caption = f"{remaining / 60:.1f} min remaining"
+                # No caption baked into the hourglass here (unlike the
+                # standalone frame, which can carry one on its neck row) --
+                # banner + gap + hourglass alone is already 63 columns, and
+                # appending an 18-character caption to *that* pushes the
+                # widest row past 80 and wraps mid-frame in an ordinary
+                # terminal, breaking the box shape. Printed as its own line
+                # underneath instead, where the extra width costs nothing.
+                frame_rows = _hourglass_frame(tick).split("\n")
                 display = Text()
-                display.append(banner, style="bold yellow")
+                for i, (banner_row, frame_row) in enumerate(zip(banner_rows, frame_rows)):
+                    if i:
+                        display.append("\n")
+                    display.append(banner_row, style="bold yellow")
+                    display.append(_BANNER_GAP)
+                    display.append(frame_row, style="yellow")
                 display.append("\n\n")
-                display.append(_hourglass_frame(tick, caption), style="yellow")
+                display.append(f"  {remaining / 60:.1f} min remaining", style="yellow")
                 display.append("\n\n")
                 display.append(_BANNER_SIGNATURE, style="dim italic")
                 live.update(display)
