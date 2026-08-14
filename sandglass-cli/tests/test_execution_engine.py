@@ -9,6 +9,9 @@ from sandglass.execution_engine import (
     SUMMARY_MAX,
     WORK_LOG_PATH,
     ExecutionEngine,
+    _BANNER_FONT,
+    _BANNER_SIGNATURE,
+    _BANNER_TEXT,
     _BOTTOM_CELLS,
     _CYCLE_TICKS,
     _HOURGLASS_HALF,
@@ -18,6 +21,7 @@ from sandglass.execution_engine import (
     _TICKS_PER_UNIT,
     _TOP_SUBSTEPS,
     _hourglass_frame,
+    _render_banner,
 )
 from sandglass.models import Response
 from sandglass.queue_manager import QueueManager
@@ -510,6 +514,44 @@ def test_hourglass_frame_appends_caption_to_the_neck_row_only():
 def test_hourglass_frame_cycle_wraps_around():
     assert _hourglass_frame(0) == _hourglass_frame(_CYCLE_TICKS)
     assert _hourglass_frame(3) == _hourglass_frame(3 + _CYCLE_TICKS)
+
+
+def test_banner_font_covers_every_letter_sandglass_needs():
+    assert set(_BANNER_TEXT) <= set(_BANNER_FONT)
+
+
+def test_banner_glyphs_are_internally_rectangular():
+    """Each letter's own rows must agree on width, or the letters beside it in
+    the rendered word go ragged -- checked again here (not just relying on the
+    module-level assert) so a future edit to one glyph fails a test, not just
+    an import."""
+    for letter, rows in _BANNER_FONT.items():
+        assert len(rows) == 5, letter
+        widths = {len(row) for row in rows}
+        assert len(widths) == 1, f"{letter}: {rows}"
+
+
+def test_render_banner_is_a_five_row_rectangle():
+    banner = _render_banner(_BANNER_TEXT)
+    lines = banner.split("\n")
+    assert len(lines) == 5
+    widths = {len(line) for line in lines}
+    assert len(widths) == 1, "banner rows must all be the same width"
+
+
+def test_render_banner_uses_only_the_font_alphabet():
+    banner = _render_banner(_BANNER_TEXT)
+    glyph_chars = {ch for rows in _BANNER_FONT.values() for row in rows for ch in row}
+    assert set(banner) <= (glyph_chars | {"\n"})
+
+
+def test_render_banner_is_deterministic():
+    assert _render_banner(_BANNER_TEXT) == _render_banner(_BANNER_TEXT)
+
+
+def test_the_signature_names_the_project_and_the_author():
+    assert "Sandglass" in _BANNER_SIGNATURE
+    assert "Igky Aisa" in _BANNER_SIGNATURE
 
 
 def test_sleep_with_animation_waits_the_full_duration_and_prints_start_end(qm, capsys):

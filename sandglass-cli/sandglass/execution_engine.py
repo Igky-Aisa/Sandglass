@@ -189,6 +189,39 @@ _SAND_FULL = ":"
 _SAND_LOOSE = "."  # a half-drained top row, or a grain still on the move
 _SAND_EMPTY = " "
 
+# --- "SANDGLASS" banner shown above the hourglass while waiting -----------
+# A hand-drawn 5-row block font, deliberately covering only the letters this
+# one word needs (S A N D G L) rather than a general alphabet -- there is no
+# other caller. Widths are per-letter, not fixed: each glyph's own rows must
+# be equal-length (checked once at import time below), but different letters
+# may differ from each other.
+_BANNER_TEXT = "SANDGLASS"
+_BANNER_FONT: dict[str, tuple[str, str, str, str, str]] = {
+    "S": (" █████", "█     ", " ████ ", "     █", "█████ "),
+    "A": (" ███  ", "█   █ ", "██████", "█   █ ", "█   █ "),
+    "N": ("█   █", "██  █", "█ █ █", "█  ██", "█   █"),
+    "D": ("████ ", "█   █", "█   █", "█   █", "████ "),
+    "G": (" ████", "█    ", "█  ██", "█   █", " ████"),
+    "L": ("█    ", "█    ", "█    ", "█    ", "█████"),
+}
+# The tagline shown under the banner while waiting.
+_BANNER_SIGNATURE = "Sandglass is an open-source CLI app for developers, by Igky Aisa."
+
+
+def _render_banner(word: str) -> str:
+    """The word rendered in :data:`_BANNER_FONT`, one letter beside the next."""
+    glyphs = [_BANNER_FONT[ch] for ch in word]
+    return "\n".join(" ".join(g[row] for g in glyphs) for row in range(5))
+
+
+# Fails fast at import if a glyph's rows ever drift out of alignment, rather
+# than shipping a banner that looks broken only once it's actually printed to
+# a terminal mid-wait, hours into an unattended run.
+for _ch, _glyph in _BANNER_FONT.items():
+    assert len(_glyph) == 5, f"banner glyph {_ch!r} must have 5 rows"
+    assert len({len(_row) for _row in _glyph}) == 1, f"banner glyph {_ch!r} rows must be equal width"
+del _ch, _glyph
+
 
 def _hourglass_frame(tick: int, caption: str = "") -> str:
     """One frame of the looping ASCII hourglass, keyed only by a tick counter.
@@ -924,6 +957,10 @@ class ExecutionEngine:
             "Press Ctrl-C to stop (queue stays intact).[/yellow]"
         )
 
+        # Built once, not per frame -- the banner and signature are static, so
+        # only the hourglass underneath them needs to be redrawn every tick.
+        banner = _render_banner(_BANNER_TEXT)
+
         deadline = time.monotonic() + total_seconds
         tick = 0
         with Live(console=console, auto_refresh=False, transient=True) as live:
@@ -932,7 +969,13 @@ class ExecutionEngine:
                 if remaining <= 0:
                     break
                 caption = f"{remaining / 60:.1f} min remaining"
-                live.update(Text(_hourglass_frame(tick, caption), style="yellow"))
+                display = Text()
+                display.append(banner, style="bold yellow")
+                display.append("\n\n")
+                display.append(_hourglass_frame(tick, caption), style="yellow")
+                display.append("\n\n")
+                display.append(_BANNER_SIGNATURE, style="dim italic")
+                live.update(display)
                 live.refresh()
                 tick += 1
                 await asyncio.sleep(min(ANIMATION_TICK_SECONDS, remaining))

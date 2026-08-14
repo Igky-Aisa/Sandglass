@@ -1,6 +1,4 @@
-=======================
 
-is it posible to add the deep seek v4 api key , so when the future prompt says **CLINE: pro** — external-OK , then the deepseek is use ?
 
 ==============
 

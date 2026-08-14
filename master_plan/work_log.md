@@ -515,3 +515,130 @@
 
 ### 3. Next Steps (For the next agent)
 - Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-13 - Claude (Sonnet 5) - SANDGLASS banner in the quota-wait animation
+
+### 1. Context Snapshot
+- **Goal**: Show a big "SANDGLASS" block-letter banner and an author signature inside the existing hourglass wait animation.
+- **State**: `sandglass-cli/sandglass/execution_engine.py` — `_render_banner`, `_BANNER_FONT`, `_BANNER_SIGNATURE`; `_sleep_with_animation` now composes banner + hourglass + signature into one `Text`.
+- **Previous Blocker**: none — cosmetic addition, no dependency on open items.
+
+### 2. Work Done
+- **Hand-drawn 5-row block font**, only for the letters SANDGLASS needs (S A N D G L) — no general alphabet, since there's exactly one caller. A module-level `assert` checks every glyph's rows are equal-width at import time, so a future typo in the font fails on `import sandglass`, not silently in a terminal hours into an unattended run. Verified the render both as a raw string (row alignment) and through actual Rich `Text`/`Console` output before wiring it in, since a font that looks right as plain strings can still misrender through Rich's styling.
+- **Banner + signature live inside the same `Live` transient region as the hourglass**, not printed separately beforehand. Rebuilt every 0.5s tick alongside the hourglass despite being static, which is cheap (string concat) — the alternative (print once, outside `Live`) would leave a permanent banner in scrollback on every quota-wait, which gets noisy across a multi-account overnight run with several rotations.
+- Existing hourglass shape tests (`_hourglass_frame`) untouched and still pass — they exercise the frame function directly, which the banner change doesn't touch.
+
+### 3. Next Steps (For the next agent)
+- Purely cosmetic; nothing pending. If the banner ever needs new letters (e.g. a rebrand), extend `_BANNER_FONT` and the import-time assert will catch any row-width mistake immediately.
+
+## 2026-08-14 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-14 - sandglass execute (claude-opus-4-8) - second
+
+### 1. Context Snapshot
+- **Goal**: second
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: second
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-14 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-14 - sandglass execute (claude-opus-4-8) - First prompt
+
+### 1. Context Snapshot
+- **Goal**: First prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: First prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-14 - sandglass execute (claude-opus-4-8) - Second prompt
+
+### 1. Context Snapshot
+- **Goal**: Second prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: Second prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
+
+## 2026-08-14 - sandglass execute (claude-opus-4-8) - a manually added prompt
+
+### 1. Context Snapshot
+- **Goal**: a manually added prompt
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: a manually added prompt
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-14 - sandglass execute (claude-opus-4-8) - first
+
+### 1. Context Snapshot
+- **Goal**: first
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: first
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_001.json` for the full response if more detail is needed.
+
+## 2026-08-14 - sandglass execute (claude-opus-4-8) - second
+
+### 1. Context Snapshot
+- **Goal**: second
+- **State**: Auto-logged by `sandglass execute` -- this prompt's own headless run didn't write its own work_log.md entry, so this fallback stands in for it.
+- **Previous Blocker**: N/A
+
+### 2. Work Done
+- done: second
+- 10 tokens billed (0 read from cache), $0.00
+
+### 3. Next Steps (For the next agent)
+- Auto-logged entry, not a full report -- see `.sandglass/responses/response_002.json` for the full response if more detail is needed.
