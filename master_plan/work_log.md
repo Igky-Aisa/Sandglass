@@ -2,6 +2,20 @@
 
 > Older entries live in `master_plan/archive/work_log_archive_2026-08-14.md`. This file keeps the most recent 5 so reading it stays cheap; consult the archive only when you need history older than that.
 
+## 2026-08-14 - Claude (Sonnet 5) - ntfy "arriving all at once in the evening" — diagnosed, not a code bug
+
+### 1. Context Snapshot
+- **Goal**: User reported ntfy pushes seem to batch up and land all at once in the evening instead of in the moment.
+- **State**: Read-only investigation — `sandglass/notify.py`, `sandglass/quiet_hours.py`, `sandglass/execution_engine.py`, `~/.sandglass/settings.json`, env vars.
+- **Previous Blocker**: none.
+
+### 2. Work Done
+- **Ruled out the codebase.** Every `notify.send()` call (quota hit, error, no-artifact, stalled, batch complete, and the new 5%-milestone push) fires synchronously at the point the event is detected — nothing buffers or schedules sends. `quiet_hours` is configured 23:00–06:00 (`~/.sandglass/settings.json`; no `SANDGLASS_QUIET_HOURS` override anywhere), which is overnight, not evening, and suppressed pushes are *dropped, not queued* — so there's no release-at-once mechanism even at 06:00.
+- **Likely cause is phone-side FCM batching**, not Sandglass: the free `ntfy.sh` path delivers Android pushes via Firebase Cloud Messaging unless "Instant delivery" is enabled in the ntfy app, and Android can defer normal-priority FCM pushes to a maintenance window (often triggered when the phone is next unlocked — commonly evening). User was pointed at two app-side settings (Instant delivery, battery-optimization exemption) rather than a code change.
+
+### 3. Next Steps (For the next agent)
+- No code change made or needed. If the evening-batching complaint recurs after the phone-side settings are fixed, revisit whether `notify.send()`'s default priority (only two of ~8 call sites use `"high"`) is worth raising across the board — declined this time as a first step since it doesn't address FCM batching directly.
+
 ## 2026-08-12 - Opus 5 - Stop re-dispatching blocks another runner already finished
 
 ### 1. Context Snapshot
