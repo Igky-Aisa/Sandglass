@@ -59,6 +59,16 @@ class StorageService:
         return os.path.join(self.base_path, "run_state.json")
 
     @property
+    def progress_notify_path(self) -> str:
+        """The highest prompt-throughput percentage milestone already pushed
+        to the phone, so a restarted run doesn't re-announce 5%, 10%, 15%...
+        from scratch, and a run that completes several blocks inside one 5%
+        band only notifies once. Per-project, like every other file under
+        `.sandglass/` -- a fresh project starts back at "nothing notified".
+        """
+        return os.path.join(self.base_path, "progress_notify.json")
+
+    @property
     def last_run_path(self) -> str:
         """What the most recent `sandglass execute` is doing, and why it ended.
 

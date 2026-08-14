@@ -174,6 +174,56 @@ def test_stop_mode_never_asks(project):
     assert result.stopped_reason == "no_artifact"
 
 
+def test_left_in_place_notifies_even_without_auto_resume(project, monkeypatch):
+    """A left-in-place stop used to reach the phone only via
+    run_with_auto_resume's post-hoc wrapper -- meaning `--once`, which never
+    calls that wrapper, notified nobody. Fixed by notifying inline in
+    execute_queue itself, at the point the stop reason is set."""
+    sent = []
+    monkeypatch.setattr(
+        "sandglass.execution_engine.notify.send",
+        lambda message, title="Sandglass", priority="default": sent.append(title),
+    )
+    qm, _ = _queue(project)
+
+    asyncio.run(ExecutionEngine(qm, _Client(verdict="NOOP")).execute_queue())
+
+    assert sent == ["Sandglass: nothing left to build"]
+
+
+def test_no_artifact_notifies_exactly_once_through_auto_resume(project, monkeypatch):
+    """The bug this pins: execute_queue already notified "no work product"
+    inline, and run_with_auto_resume's wrapper notified the SAME stop a
+    second time -- a real, pre-existing double-fire, confirmed by tracing the
+    code before this test existed."""
+    sent = []
+    monkeypatch.setattr(
+        "sandglass.execution_engine.notify.send",
+        lambda message, title="Sandglass", priority="default": sent.append(title),
+    )
+    qm, _ = _queue(project)
+    client = _Client(verdict="BLOCKED", why="P0 was never built")
+
+    asyncio.run(ExecutionEngine(qm, client).run_with_auto_resume(poll_interval=0.05))
+
+    assert sent == ["Sandglass: no work product"]
+
+
+def test_left_in_place_notifies_exactly_once_through_auto_resume(project, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "sandglass.execution_engine.notify.send",
+        lambda message, title="Sandglass", priority="default": sent.append(title),
+    )
+    qm, _ = _queue(project)
+
+    asyncio.run(
+        ExecutionEngine(qm, _Client(verdict="NOOP")).run_with_auto_resume(poll_interval=0.05)
+    )
+
+    assert sent == ["Sandglass: nothing left to build"]
+
+
 def test_an_invalid_mode_is_rejected_up_front(project):
     qm, _ = _queue(project)
     with pytest.raises(ValueError):

@@ -1,7 +1,7 @@
 import os
 
 from sandglass import prompt_source
-from sandglass.prompt_source import _DELIMITER_RE
+from sandglass.prompt_source import _DELIMITER_RE, history_path_for, throughput
 
 
 SAMPLE = """model: opus
@@ -151,3 +151,72 @@ def test_prepend_to_history_puts_newest_entry_first(tmp_path):
 def test_history_path_for_is_a_sibling_of_the_source_file():
     path = prompt_source.history_path_for(os.path.join("prompt_tools", "future_prompts.md"))
     assert path == os.path.join("prompt_tools", "prompt_history.md")
+
+
+# --- throughput() -- the done/remaining/total/pct count behind Progress.md's
+# "Prompt throughput" section and the 5%-milestone notifications built on it.
+
+
+def _write(path, text):
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def test_throughput_is_none_when_neither_file_has_content(tmp_path):
+    source = str(tmp_path / "future_prompts.md")
+    assert throughput(source) is None
+
+
+def test_throughput_basic_count(tmp_path):
+    source = _write(tmp_path / "future_prompts.md", "First block\n\n====\n\nSecond block\n")
+    _write(tmp_path / "prompt_history.md", "# History\n\n---\n\n## First done\n\nstuff\n")
+
+    assert throughput(source) == (1, 2, 3, 33)  # 1 done, 2 remaining, 3 total, 33% (rounds down)
+
+
+def test_throughput_all_done_is_100_percent(tmp_path):
+    source = str(tmp_path / "future_prompts.md")  # empty/missing -- nothing queued
+    _write(tmp_path / "prompt_history.md", "# History\n\n---\n\n## One\n\n## Two\n")
+
+    assert throughput(source) == (2, 0, 2, 100)
+
+
+def test_throughput_nothing_done_is_zero_percent(tmp_path):
+    source = _write(tmp_path / "future_prompts.md", "Only block\n")
+    assert throughput(source) == (0, 1, 1, 0)
+
+
+def test_throughput_ignores_a_quoted_heading_inside_a_fenced_block(tmp_path):
+    """The exact bug templates/prompt_tools/count_blocks.py documents: a
+    completion entry legitimately quotes the block it ran inside a fenced
+    code block, and that quoted text can itself contain a `## ` line."""
+    source = str(tmp_path / "future_prompts.md")
+    _write(
+        tmp_path / "prompt_history.md",
+        "# History\n\n---\n\n"
+        "## Real entry\n\n"
+        "**Executed:** 2026-08-14\n\n"
+        "```\n"
+        "============================\n\n"
+        "## This looks like a heading but it is quoted prompt text\n\n"
+        "============================\n"
+        "```\n",
+    )
+    assert throughput(source) == (1, 0, 1, 100)  # not 2
+
+
+def test_throughput_pct_rounds_down(tmp_path):
+    """1/3 = 33.33...%, must read 33 not 34 -- a milestone notification should
+    announce a percentage once it's actually reached, never early."""
+    source = _write(tmp_path / "future_prompts.md", "A\n\n====\n\nB\n")
+    _write(tmp_path / "prompt_history.md", "# History\n\n---\n\n## Done one\n")
+
+    done, remaining, total, pct = throughput(source)
+    assert (done, remaining, total) == (1, 2, 3)
+    assert pct == 33
+
+
+def test_throughput_missing_history_file_counts_as_zero_done(tmp_path):
+    source = _write(tmp_path / "future_prompts.md", "Only block\n")
+    # No prompt_history.md written at all.
+    assert throughput(source) == (0, 1, 1, 0)

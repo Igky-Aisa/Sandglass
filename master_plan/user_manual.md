@@ -773,15 +773,33 @@ running it more often; below the threshold it does nothing and says so.
 ## 13. Push notifications (ntfy.sh)
 
 If you're not watching the terminal during a long run, `sandglass execute` can push a
-notification via [ntfy.sh](https://ntfy.sh) at four points:
+notification via [ntfy.sh](https://ntfy.sh) at every point that matters:
 
 - **You've hit your token limits** ("token limits hit") — including the time the limit is
-  expected to refresh, shown in your own local time. This one arrives even with `--once`,
-  which stops instead of waiting.
+  expected to refresh, shown in your own local time.
 - The wait ends and the queue resumes ("resuming")
+- **A markdown-sourced queue crosses a 5% prompt-throughput milestone** — 55%, 60%, 65%,
+  and so on — as blocks complete. See "Progress milestones" below.
 - The whole queue finishes ("batch complete")
-- The batch stops early for a non-quota reason, or gives up after too many stalls
-  ("batch stopped early")
+- The batch stops early for any reason — a crash, a block that refused and was left in
+  place, or too many stalls in a row — ("batch stopped early" / "no work product" /
+  "nothing left to build")
+
+Every one of these arrives even with `--once`, not only the default mode that waits out a
+quota and keeps going — each is sent the moment Sandglass detects it, so a short run that
+stops on its own tells you exactly as much as a long unattended one does.
+
+### Progress milestones
+
+For a project using the `master_plan/` convention with a markdown-sourced queue, completing
+a block checks whether the project's overall done/remaining percentage — the same number
+`master_plan/Progress.md`'s "Prompt throughput" section already shows — just crossed a new
+5% line. If it did, your phone gets a push ("Sandglass: 60% complete", say), and
+`Progress.md` is updated with the current numbers at the same time, so it no longer goes
+stale between the times you (or an agent) run "check progress" by hand. Only the throughput
+section changes — the phase-by-phase judgment above it is never touched automatically.
+Milestones never repeat: once your phone has been told about 60%, it won't be told again
+just because a restart re-counted the same blocks.
 
 **Setup** — pick a topic name (something private/hard to guess, since anyone who knows
 it can read your notifications — ntfy topics aren't access-controlled by default) and

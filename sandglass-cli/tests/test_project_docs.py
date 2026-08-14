@@ -109,3 +109,117 @@ def test_repeated_rotation_does_not_stack_pointer_lines(tmp_path):
 
 def test_apply_brief_leaves_the_prompt_alone_when_there_is_no_brief():
     assert project_docs.apply_brief("do the thing", None) == "do the thing"
+
+
+# --- update_progress_throughput() -- the mechanical, automatic keeper of
+# Progress.md's "Prompt throughput" section, called once per completed
+# markdown-sourced block rather than only when a human runs "check progress".
+
+_PROGRESS_SEED = """# Progress
+
+At-a-glance project status.
+
+---
+
+_Last updated: 2026-08-09 — Opus 4.8_
+
+## Against the main idea (`MASTER_ARQ_SYSTEM_MAP.md`)
+
+- **Phase 1 — MVP:** done.
+
+## Prompt throughput
+
+- **Done** (`prompt_tools/prompt_history.md`): 16
+- **Remaining** (`prompt_tools/future_prompts.md`): 1
+- **Total:** 17 — **94%** complete
+
+## Blockers / notes
+
+- None.
+"""
+
+
+def _seed_progress(tmp_path, text=_PROGRESS_SEED):
+    master_plan = tmp_path / "master_plan"
+    master_plan.mkdir(exist_ok=True)
+    (master_plan / "Progress.md").write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def test_update_progress_throughput_overwrites_only_the_numbers(tmp_path):
+    project = _seed_progress(tmp_path)
+
+    ok = project_docs.update_progress_throughput(
+        str(project),
+        done=20, remaining=3, total=23, pct=86,
+        done_label="`prompt_tools/prompt_history.md`",
+        remaining_label="`prompt_tools/future_prompts.md`",
+    )
+
+    assert ok is True
+    text = (project / "master_plan" / "Progress.md").read_text(encoding="utf-8")
+    assert "- **Done** (`prompt_tools/prompt_history.md`): 20" in text
+    assert "- **Remaining** (`prompt_tools/future_prompts.md`): 3" in text
+    assert "- **Total:** 23 — **86%** complete" in text
+    # Old numbers are gone, not just appended alongside.
+    assert ": 16" not in text
+    assert "94%" not in text
+
+
+def test_update_progress_throughput_never_touches_the_qualitative_section(tmp_path):
+    """The "Against the main idea" phase judgment is a human/agent call this
+    mechanical hook has no business overwriting -- it must survive byte for
+    byte."""
+    project = _seed_progress(tmp_path)
+
+    project_docs.update_progress_throughput(
+        str(project),
+        done=1, remaining=1, total=2, pct=50,
+        done_label="`x`", remaining_label="`y`",
+    )
+
+    text = (project / "master_plan" / "Progress.md").read_text(encoding="utf-8")
+    assert "## Against the main idea (`MASTER_ARQ_SYSTEM_MAP.md`)" in text
+    assert "- **Phase 1 — MVP:** done." in text
+    assert "_Last updated: 2026-08-09 — Opus 4.8_" in text  # attribution untouched
+    assert "## Blockers / notes" in text
+    assert "- None." in text
+
+
+def test_update_progress_throughput_returns_false_without_progress_md(tmp_path):
+    (tmp_path / "master_plan").mkdir()  # no Progress.md written
+
+    ok = project_docs.update_progress_throughput(
+        str(tmp_path),
+        done=1, remaining=1, total=2, pct=50,
+        done_label="`x`", remaining_label="`y`",
+    )
+
+    assert ok is False
+    assert not (tmp_path / "master_plan" / "Progress.md").exists()
+
+
+def test_update_progress_throughput_returns_false_on_a_non_matching_shape(tmp_path):
+    """Conservative on purpose: this runs automatically, with no human
+    reading a diff first, so a Progress.md that has been hand-edited into a
+    different shape must be left alone rather than guessed at."""
+    project = _seed_progress(tmp_path, text="# Progress\n\nNo throughput section here at all.\n")
+
+    ok = project_docs.update_progress_throughput(
+        str(project),
+        done=1, remaining=1, total=2, pct=50,
+        done_label="`x`", remaining_label="`y`",
+    )
+
+    assert ok is False
+    text = (project / "master_plan" / "Progress.md").read_text(encoding="utf-8")
+    assert text == "# Progress\n\nNo throughput section here at all.\n"
+
+
+def test_update_progress_throughput_returns_false_without_master_plan_dir(tmp_path):
+    ok = project_docs.update_progress_throughput(
+        str(tmp_path),
+        done=1, remaining=1, total=2, pct=50,
+        done_label="`x`", remaining_label="`y`",
+    )
+    assert ok is False

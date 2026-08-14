@@ -636,10 +636,13 @@ Accounts used:
 ### Push notifications (ntfy.sh)
 
 If you're not watching the terminal, set an [ntfy.sh](https://ntfy.sh) topic and
-`sandglass execute` will push a notification at each of these points: **token limits
-hit** (with the expected refresh time), the wait ends and it resumes, the whole queue
-finishes, or the batch stops early for a non-quota reason. The token-limit one fires
-under `--once` too, even though that mode never waits.
+`sandglass execute` will push a notification (to the free ntfy app on iOS/Android, or
+any topic subscriber) at every point a run stops or reaches a milestone: **token limits
+hit** (with the expected refresh time), the wait ends and it resumes, **5% prompt-throughput
+milestones** as markdown-sourced blocks land, the whole queue finishes, or the batch stops
+early for any reason — a crash, a refused block, or one left in place. Every one of these
+fires under `--once` too, not only the default auto-resume mode — each is sent exactly once,
+at the point it's detected, rather than relying on a wrapper that `--once` never reaches.
 
 ```bash
 export SANDGLASS_NTFY_TOPIC=your-topic-name     # pick something private/hard to guess
@@ -653,6 +656,20 @@ parser, gitignored by convention). If `SANDGLASS_NTFY_TOPIC` isn't set, notifica
 silently skipped — nothing fails or slows down because of it.
 
 Ctrl-C at any point stops the wait cleanly — the queue stays exactly as it was.
+
+#### Progress milestones
+
+For a markdown-sourced queue in a project using the `master_plan/` convention, completing
+a block pushes a notification every time the project's overall prompt-throughput crosses a
+new 5% line (55%, 60%, 65%, ...) — the same done/remaining/total definition CLAUDE.md's
+"check progress" trigger already uses, computed fresh from `future_prompts.md` and
+`prompt_history.md` rather than waiting for someone to run that trigger by hand. The same
+numbers are written straight into `master_plan/Progress.md`'s "Prompt throughput" section,
+so it stays live between manual "check progress" runs instead of going stale. Only that one
+section is touched — the qualitative "Against the main idea" judgment above it is a call only
+a human or an agent reading the architecture doc can make, and this mechanical hook never
+overwrites it. Milestones only move forward: a restarted run won't re-announce 5%, 10%,
+15%... from scratch, and several blocks landing in the same 5% band notify once.
 
 #### Sleep time (quiet hours)
 

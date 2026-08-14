@@ -189,6 +189,72 @@ def test_quota_hit_notifies_even_without_auto_resume(qm, monkeypatch):
     assert "2 prompt(s) still queued" in message
 
 
+def test_error_notifies_even_without_auto_resume(qm, monkeypatch):
+    """`--once` never reaches run_with_auto_resume's wrapper, and a plain
+    crash mid-block used to reach the phone only through it -- meaning a
+    crash under `--once` produced zero notifications at all."""
+    sent = []
+    monkeypatch.setattr(
+        "sandglass.execution_engine.notify.send",
+        lambda message, title="Sandglass", priority="default": sent.append((title, priority)),
+    )
+    qm.add_prompt("will fail")
+    engine = ExecutionEngine(qm, _AlwaysErrorClient())
+
+    asyncio.run(engine.execute_queue())
+
+    assert sent == [("Sandglass: batch stopped early", "high")]
+
+
+def test_error_notifies_exactly_once_through_auto_resume(qm, monkeypatch):
+    """Regression guard: the fix above must not turn into a double-fire the
+    way no_artifact's did (see test_on_refusal.py) once run_with_auto_resume
+    also has a chance to notify for the same stop."""
+    sent = []
+    monkeypatch.setattr(
+        "sandglass.execution_engine.notify.send",
+        lambda message, title="Sandglass", priority="default": sent.append(title),
+    )
+    qm.add_prompt("will fail")
+    engine = ExecutionEngine(qm, _AlwaysErrorClient())
+
+    asyncio.run(engine.run_with_auto_resume(poll_interval=0.05))
+
+    assert sent == ["Sandglass: batch stopped early"]
+
+
+def test_clean_completion_notifies_even_without_auto_resume(qm, monkeypatch):
+    """A queue that drains fully under `--once` used to notify nobody at
+    all -- "batch complete" only ever fired from run_with_auto_resume's own
+    post-loop check, which `--once` never reaches."""
+    sent = []
+    monkeypatch.setattr(
+        "sandglass.execution_engine.notify.send",
+        lambda message, title="Sandglass", priority="default": sent.append(title),
+    )
+    qm.add_prompt("first")
+    qm.add_prompt("second")
+    engine = ExecutionEngine(qm, _FlakyThenOkClient(fail_text="__never__", times=0))
+
+    asyncio.run(engine.execute_queue())
+
+    assert sent == ["Sandglass: batch complete"]
+
+
+def test_clean_completion_notifies_exactly_once_through_auto_resume(qm, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "sandglass.execution_engine.notify.send",
+        lambda message, title="Sandglass", priority="default": sent.append(title),
+    )
+    qm.add_prompt("first")
+    engine = ExecutionEngine(qm, _FlakyThenOkClient(fail_text="__never__", times=0))
+
+    asyncio.run(engine.run_with_auto_resume(poll_interval=0.05))
+
+    assert sent == ["Sandglass: batch complete"]
+
+
 def test_run_with_auto_resume_sends_notification_when_stopped_early(qm, monkeypatch):
     sent = []
     monkeypatch.setattr(

@@ -575,6 +575,17 @@ class ExecutionEngine:
                     "  [yellow]Stopping. Remaining prompts stay in the queue "
                     "for a later `sandglass execute`.[/yellow]"
                 )
+                # Fired here, at the point of detection, same as the quota and
+                # no-artifact stops above -- `--once` never reaches
+                # run_with_auto_resume's wrapper, so a plain crash mid-block
+                # used to reach the phone only in the default auto-resume mode.
+                still_queued = total - i
+                notify.send(
+                    f"Stopped after an error on '{prompt.title}': {exc}. "
+                    f"{still_queued} prompt(s) still queued.",
+                    title="Sandglass: batch stopped early",
+                    priority="high",
+                )
                 break
 
             # --- the artifact gate ---------------------------------------------
@@ -677,6 +688,7 @@ class ExecutionEngine:
             self.queue_manager.remove_prompt_entry(prompt)
             if prompt.origin_file:
                 self._cut_from_source(prompt, response)
+                self._maybe_notify_progress(prompt)
 
         # Blocks left in place are still queued, so this run did not finish the
         # queue however smoothly it ran. Saying "complete" here would be the
@@ -688,6 +700,13 @@ class ExecutionEngine:
             stopped_detail = "; ".join(
                 f"{p.id}: {verdict} — {why}" for p, verdict, why in left_in_place
             )
+            # Fired here, not only from run_with_auto_resume's wrapper, for the
+            # same --once-mode reason as every other stop notification above.
+            notify.send(
+                f"{len(left_in_place)} block(s) reported they needed no file "
+                "change, so none were cut. Read them and cut by hand if you agree.",
+                title="Sandglass: nothing left to build",
+            )
 
         # The drain is over — end the chain so the next `sandglass execute`
         # opens a fresh conversation rather than appending unrelated work to
@@ -696,6 +715,12 @@ class ExecutionEngine:
         # session when it picks back up.
         if stopped_reason is None and not self.queue_manager.load_queue():
             self._clear_run_state()
+            # Same reasoning: fired here so `--once` gets a "batch complete"
+            # push too, not only the default auto-resume path.
+            notify.send(
+                f"{len(results)} prompt(s) executed, {total_tokens:,} tokens used.",
+                title="Sandglass: batch complete",
+            )
 
         elapsed = time.monotonic() - start
         logger.info(
@@ -786,45 +811,18 @@ class ExecutionEngine:
 
             remaining = self.queue_manager.load_queue()
             if not remaining:
-                notify.send(
-                    f"{last_result.completed} prompt(s) executed, "
-                    f"{last_result.total_tokens:,} tokens used.",
-                    title="Sandglass: batch complete",
-                )
+                # No notification here -- execute_queue already sent "batch
+                # complete" the instant it detected a clean, full drain, which
+                # is true on every path that reaches this line. This check is
+                # just how the loop notices it's done and can stop.
                 return last_result
             if last_result.stopped_reason != "quota":
-                # Non-quota failure -- don't auto-retry, the user needs to look at it.
-                # "no_artifact" gets its own wording: it is not an error in the usual
-                # sense (nothing crashed), and describing it as one sends the reader
-                # hunting for a stack trace instead of reading the response.
-                if last_result.stopped_reason == run_report.REASON_LEFT_IN_PLACE:
-                    notify.send(
-                        f"{len(remaining)} block(s) reported they needed no file "
-                        "change, so none were cut. Read them and cut by hand if "
-                        "you agree.",
-                        title="Sandglass: nothing left to build",
-                    )
-                elif last_result.stopped_reason == "no_artifact":
-                    notify.send(
-                        f"Stopped: a prompt returned a response but changed no files, so "
-                        f"its block was NOT cut. {last_result.completed} prompt(s) executed, "
-                        f"{len(remaining)} still queued. Read the saved response.",
-                        title="Sandglass: no work product",
-                        priority="high",
-                    )
-                else:
-                    # Carry the actual reason to the phone. "Stopped after an
-                    # error" tells you to go and look; the error itself often
-                    # tells you whether you need to.
-                    saved = run_report.load(self.storage)
-                    why = f" {saved.detail.splitlines()[0]}" if saved and saved.detail else ""
-                    notify.send(
-                        f"Stopped after a non-quota error.{why} "
-                        f"{last_result.completed} prompt(s) executed, "
-                        f"{len(remaining)} still queued for a later run.",
-                        title="Sandglass: batch stopped early",
-                        priority="high",
-                    )
+                # Non-quota failure -- don't auto-retry, the user needs to look
+                # at it. No notification here either: execute_queue already
+                # sent one for every stop reason it can produce -- quota,
+                # no_artifact, left_in_place, error -- at the point of
+                # detection. That is what makes it reach the phone under
+                # `--once` too, a mode that never calls this function at all.
                 return last_result
 
             made_progress = last_result.completed > 0 or remaining[0].id != prompts_before[0].id
@@ -1271,17 +1269,51 @@ class ExecutionEngine:
         self._save_response(prompt, response)
         return response
 
-    @staticmethod
-    def _project_dir(prompt: PromptObject) -> str | None:
+    # How far _project_dir walks up looking for master_plan/ before giving up.
+    # 1 covers the standard layout (prompt_tools/future_prompts.md, one level
+    # under the project root); a few more is cheap insurance for a `queue
+    # import` pointing somewhere deeper, without walking indefinitely.
+    _PROJECT_DIR_SEARCH_DEPTH = 4
+
+    @classmethod
+    def _project_dir(cls, prompt: PromptObject) -> str | None:
         """Directory whose `master_plan/` describes this prompt's project.
 
-        Anchored on the markdown queue source for the same reason the artifact
-        gate is: that file lives in the repo the prompt is about, which is not
-        necessarily the directory Sandglass was invoked from.
+        Anchored on the markdown queue source rather than the process's own
+        CWD, for the same reason the artifact gate is: that file lives in the
+        repo the prompt is about, which is not necessarily the directory
+        Sandglass was invoked from.
+
+        Walks up from the source file's own directory looking for a
+        `master_plan/` sibling, rather than assuming one dirname() lands on
+        it. The standard layout is `prompt_tools/future_prompts.md` with
+        `master_plan/` one level further up (a *sibling* of `prompt_tools/`,
+        not its parent) — a single dirname() lands on `prompt_tools/` itself,
+        which never contains `master_plan/`. That silently defeated the
+        project-state brief for every project using the default queue source:
+        confirmed empirically (2026-08-14) that `build_brief` returned `None`
+        for exactly this layout, meaning every markdown-sourced block was
+        paying to re-read `work_log.md` in full — the cost this brief exists
+        to eliminate. The artifact gate escaped the same bug by accident: it
+        shells out to `git`, which resolves its own repo root via `git
+        rev-parse --show-toplevel` regardless of the `cwd` it's given.
         """
-        if prompt.origin_file:
-            return os.path.dirname(os.path.abspath(prompt.origin_file)) or None
-        return None
+        if not prompt.origin_file:
+            return None
+        directory = os.path.dirname(os.path.abspath(prompt.origin_file))
+        current = directory
+        for _ in range(cls._PROJECT_DIR_SEARCH_DEPTH):
+            if project_docs.uses_convention(current):
+                return current
+            parent = os.path.dirname(current)
+            if parent == current:  # reached a filesystem root
+                break
+            current = parent
+        # Not found within the search depth -- return the immediate directory
+        # as before. Every caller already goes through `uses_convention` (or
+        # tolerates a brief-less/no-op result) for a project that doesn't use
+        # the convention at all, so this isn't a new failure mode.
+        return directory or None
 
     # --- Session continuity ------------------------------------------------
 
@@ -1531,6 +1563,71 @@ class ExecutionEngine:
                 "Failed to note interruption of prompt %s in %s: %s",
                 prompt.id, prompt.origin_file, exc,
             )
+
+    def _maybe_notify_progress(self, prompt: PromptObject) -> None:
+        """Push a phone notification when prompt throughput crosses a new 5%
+        milestone, and keep `Progress.md`'s own throughput numbers live
+        rather than stale until someone next runs "check progress" by hand.
+
+        Only for markdown-sourced blocks (``prompt.origin_file`` set — a
+        `queue add` prompt has no source/history pair to count) in a project
+        that already uses the `master_plan/` convention. See
+        `prompt_source.throughput` for the count itself and why it is a
+        separate, simpler definition than
+        `templates/prompt_tools/count_blocks.py`'s project-specific one.
+
+        A status ping must never break a block that otherwise completed
+        successfully -- the whole body runs under one broad try/except for
+        that reason (not just OSError: `os.path.relpath` raises `ValueError`
+        on Windows when two paths resolve to different drives, which is a
+        real possibility here, not a hypothetical one).
+        """
+        try:
+            self._notify_progress_milestone(prompt)
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            logger.warning(
+                "Could not update/notify prompt-throughput progress for %s: %s",
+                prompt.id, exc,
+            )
+
+    def _notify_progress_milestone(self, prompt: PromptObject) -> None:
+        project_dir = self._project_dir(prompt)
+        if not project_docs.uses_convention(project_dir):
+            return
+        counted = prompt_source.throughput(prompt.origin_file)
+        if counted is None:
+            return
+        done, remaining, total, pct = counted
+
+        # Resolved to absolute paths before diffing against project_dir (also
+        # absolute) so the label is correct regardless of the process's own
+        # CWD at call time, rather than relying on it implicitly matching.
+        history_path = os.path.abspath(prompt_source.history_path_for(prompt.origin_file))
+        source_path = os.path.abspath(prompt.origin_file)
+        project_docs.update_progress_throughput(
+            project_dir,
+            done=done, remaining=remaining, total=total, pct=pct,
+            done_label=f"`{os.path.relpath(history_path, project_dir).replace(os.sep, '/')}`",
+            remaining_label=f"`{os.path.relpath(source_path, project_dir).replace(os.sep, '/')}`",
+        )
+
+        milestone = (pct // 5) * 5
+        if milestone <= 0:
+            return
+        state_path = self.storage.progress_notify_path
+        state = self.storage.load_json(state_path)
+        last = state.get("last_notified_pct", -1) if isinstance(state, dict) else -1
+        if milestone <= last:
+            return
+        notify.send(
+            f"{pct}% complete ({done}/{total} blocks). {remaining} remaining.",
+            title=f"Sandglass: {milestone}% complete",
+        )
+        # Persisted only once the notification is actually sent, so the
+        # stored value always means "the highest milestone the phone has
+        # already been told about" -- never a milestone that was computed but
+        # never announced.
+        self.storage.save_json(state_path, {"last_notified_pct": milestone})
 
     @staticmethod
     def _work_log_snapshot() -> tuple[float, int] | None:

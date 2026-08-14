@@ -205,6 +205,64 @@ def apply_brief(prompt_text: str, brief: str | None) -> str:
     return f"{brief}\n\n{prompt_text}"
 
 
+# Matches exactly the "## Prompt throughput" section CLAUDE.md's "check
+# progress" trigger writes -- three bullet lines, in this order, with no
+# blank line between them (see the seeded Progress.md and the trigger's own
+# wording). Deliberately narrow: this must touch nothing else in the file,
+# especially not the "Against the main idea" section above it, which is a
+# judgment call only an agent reading the architecture doc can make.
+_THROUGHPUT_SECTION_RE = re.compile(
+    r"(## Prompt throughput\n\n)"
+    r"- \*\*Done\*\*[^\n]*\n"
+    r"- \*\*Remaining\*\*[^\n]*\n"
+    r"- \*\*Total:\*\*[^\n]*\n",
+)
+
+
+def update_progress_throughput(
+    cwd: str | None,
+    *,
+    done: int,
+    remaining: int,
+    total: int,
+    pct: int,
+    done_label: str,
+    remaining_label: str,
+) -> bool:
+    """Overwrite just the "Prompt throughput" bullets in `Progress.md`.
+
+    Returns ``False`` (and touches nothing) when there is no `Progress.md`,
+    or its "Prompt throughput" section doesn't match the expected shape --
+    deliberately conservative: this is called automatically, once per
+    completed block, with no human reading the diff first, so it must never
+    invent a section that isn't already there. `Progress.md`'s first write
+    (with the qualitative "Against the main idea" judgment this function
+    cannot make) stays the "check progress" trigger's job; this only keeps
+    the mechanical half of it from going stale between those manual runs.
+    """
+    path = master_plan_path(PROGRESS_NAME, cwd=cwd)
+    text = _read(path)
+    if not text:
+        return False
+
+    replacement = (
+        f"## Prompt throughput\n\n"
+        f"- **Done** ({done_label}): {done}\n"
+        f"- **Remaining** ({remaining_label}): {remaining}\n"
+        f"- **Total:** {total} — **{pct}%** complete\n"
+    )
+    new_text, n = _THROUGHPUT_SECTION_RE.subn(replacement, text, count=1)
+    if n == 0:
+        return False
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+    except OSError as exc:
+        logger.warning("Could not update %s: %s", path, exc)
+        return False
+    return True
+
+
 def rotate_log(path: str, keep: int = DEFAULT_KEEP_ENTRIES) -> tuple[int, str] | None:
     """Move all but the last ``keep`` entries of ``path`` into a dated archive.
 

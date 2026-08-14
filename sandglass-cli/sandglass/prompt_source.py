@@ -191,6 +191,62 @@ def cut_block(file_path: str, prompt_text: str) -> str | None:
     return target["text"]
 
 
+def _count_top_level_headings(text: str, prefix: str = "## ") -> int:
+    """Count lines starting with ``prefix`` at column 0, skipping anything
+    inside a fenced code block.
+
+    Needed because `prepend_to_history` quotes a completed block's full text
+    inside a fenced block, and that text can itself contain a `## ` line if
+    the original prompt used one -- indistinguishable from a real completion
+    heading to a naive line-by-line count. This is not a hypothetical: the
+    sibling project-side script (`templates/prompt_tools/count_blocks.py`)
+    documents miscounting exactly this way for four days on a real project,
+    which is why it tracks fence state and why this does too.
+    """
+    count = 0
+    in_fence = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if line.startswith(prefix):
+            count += 1
+    return count
+
+
+def throughput(source_file: str) -> tuple[int, int, int, int] | None:
+    """``(done, remaining, total, pct)`` for a markdown queue source and its
+    sibling history file, or ``None`` when there's nothing to report yet
+    (neither file has any content).
+
+    This is the same generic definition CLAUDE.md's own "check progress"
+    trigger uses -- live ``====``-delimited blocks still in the source file,
+    ``## ``-headed entries already in its history sibling -- not the stricter
+    `### P<phase>.<n>` convention `templates/prompt_tools/count_blocks.py`
+    layers on top for projects that have adopted it. That script is
+    project-side, opt-in, and convention-specific; this stays generic so it
+    means something for every project Sandglass runs against, matching how
+    the rest of this module treats project conventions.
+
+    ``pct`` rounds down, matching `count_blocks.py`'s own convention -- a
+    milestone notification should announce a percentage once it is actually
+    reached, never early.
+    """
+    remaining = len(read_blocks(source_file))
+    done = 0
+    history_path = history_path_for(source_file)
+    if os.path.exists(history_path):
+        with open(history_path, "r", encoding="utf-8") as fh:
+            done = _count_top_level_headings(fh.read())
+    total = done + remaining
+    if total == 0:
+        return None
+    pct = (done * 100) // total
+    return done, remaining, total, pct
+
+
 def history_path_for(source_file: str) -> str:
     """The sibling history file a source file's completed blocks get archived to."""
     return os.path.join(os.path.dirname(source_file) or ".", "prompt_history.md")
