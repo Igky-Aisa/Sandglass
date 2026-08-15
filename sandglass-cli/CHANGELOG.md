@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-14
+
+### Fixed
+
+- **A `CLINE: STOP` safety annotation was being parsed as the routing command it forbade.** `_external_defaults` treated any `CLINE:`/`EXTERNAL:` value as a routing target, with no concept of negation. A queue used `**CLINE: STOP** — OPUS tier: money path, concurrency, crash recovery... Claude only` as a plain-English warning to keep a block on Claude; Sandglass read it as "route externally, tier=STOP", and since "STOP" isn't a recognised tier, fell through to the default external provider anyway — sending `model: opus` blocks to DeepSeek, where "opus" resolved through DeepSeek's own tier map to `deepseek-v4-pro`. Confirmed live: an unattended order-placement block had already run this way and billed $7.55; a crash-resume/money-path block was mid-run on DeepSeek when caught, with 8 more `CLINE: STOP` blocks still queued behind it. `_CLINE_NEGATIONS` (`stop`, `no`, `none`, `off`, `never`, `claude-only`, etc.) is now checked before any provider resolution, so a negation never routes.
+
 ### Added
 
 - **Every stop reason now pushes exactly one ntfy notification, including under `--once`.** Previously notifications for quota and no-artifact stops were sent inline from `execute_queue`, but a generic error, a left-in-place stop, and a clean full completion were only ever sent from `run_with_auto_resume`'s post-hoc wrapper — a path `--once` never reaches, so those three cases notified nobody under it. Fixed by moving every stop-reason notification to fire inline in `execute_queue`, at the point each reason is actually detected, and deleting the now-redundant wrapper logic in `run_with_auto_resume`. That same tracing also caught a real, pre-existing **double notification**: a no-artifact stop was sent once by `execute_queue` and a second time by the wrapper under the default (non-`--once`) mode — confirmed with a test asserting exactly one send, not two, before the fix existed.
