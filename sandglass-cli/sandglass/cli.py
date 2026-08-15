@@ -26,6 +26,7 @@ from .execution_engine import (
     SESSION_MODES,
     ExecutionEngine,
 )
+from . import dashboard as dashboard_mod
 from . import project_docs, providers as providers_mod, quiet_hours, run_report, updater
 from .project_scaffold import new_claude_project, update_claude_md_template
 from .prompt_source import DEFAULT_QUEUE_SOURCE
@@ -1087,6 +1088,27 @@ def why() -> None:
             f"this run · {report.total_tokens:,} tokens · "
             f"${report.total_cost_usd:.2f}[/dim]"
         )
+
+
+@app.command()
+def dashboard(
+    source: str = typer.Option(
+        DEFAULT_QUEUE_SOURCE, "--source", help="Markdown queue source to report on."
+    ),
+    no_open: bool = typer.Option(
+        False, "--no-open", help="Write the file but don't open it in a browser."
+    ),
+) -> None:
+    """Write a visual status page (progress, phases, run state) and open it.
+
+    Static HTML, regenerated after every completed block during `sandglass
+    execute` -- leave the tab open and it keeps catching up on its own.
+    """
+    title = os.path.basename(os.path.abspath(os.getcwd())) or "Sandglass"
+    path = dashboard_mod.write(source, title)
+    console.print(f"[green]Dashboard written to {path}[/green]")
+    if not no_open:
+        dashboard_mod.open_in_browser(path)
 
 
 @app.command()

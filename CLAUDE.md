@@ -175,6 +175,14 @@ Add the dirty-flag badge to the strategy editor...
   normally share one warm session (that's what stops each one re-reading the
   whole project), so use this only when prior context would actively harm the
   work: an independent review, a genuine second opinion.
+- `phase:` — the stage this block belongs to, in whatever words the
+  project's own plan already uses (`phase: 8` or `phase: Causal stage
+  automation` — both fine, but every block in the same stage must spell it
+  identically or they count as different phases). Purely descriptive; nothing
+  about execution changes. The one thing it unlocks: `sandglass dashboard`
+  charts done/remaining **per phase**, not just one overall bar — blocks with
+  no `phase:` still count toward the overall total, they just don't appear
+  broken out by stage. Skip it entirely on a project with no notion of phases.
 - `model: deepseek-pro` (or `deepseek-flash`) — run this block on DeepSeek
   instead of Claude, so it doesn't eat subscription quota. Naming the model is
   all it takes; `provider: deepseek` and a `**CLINE: pro**` marker mean the

@@ -2,6 +2,23 @@
 
 > Older entries live in `master_plan/archive/work_log_archive_2026-08-14.md`. This file keeps the most recent 5 so reading it stays cheap; consult the archive only when you need history older than that.
 
+## 2026-08-14 - Claude (Sonnet 5) - `sandglass dashboard` + `phase:` front matter
+
+### 1. Context Snapshot
+- **Goal**: A visual, "modern dashboard" alternative to `Progress.md`'s text summary — overall progress, title, and a per-phase breakdown where phases exist — installed alongside every project like the rest of the `master_plan/`/`prompt_tools/` scaffolding, kept simple (no server, no bat-script trickery a browser button can't run anyway).
+- **State**: New `sandglass-cli/sandglass/dashboard.py`; `prompt_source.py` (`phase_breakdown`), `queue_manager.py`/`models.py` (`phase` front-matter field), `execution_engine.py` (auto-regenerate hook), `cli.py` (`dashboard` command). New `tests/test_dashboard.py`; `phase_breakdown` tests added to `tests/test_prompt_source.py`.
+- **Previous Blocker**: none.
+
+### 2. Work Done
+- **Static file, not a server** — settled after discussing the "button that closes/reopens via a .bat" idea: a browser button can't spawn a local process regardless (sandboxing), and a live server is one more background thing to manage. Instead the file is rewritten after every completed block (same hook `Progress.md`'s update already uses) and the page itself carries `<meta http-equiv="refresh">`, so a tab left open catches up with zero clicks and zero extra processes.
+- **`phase:` reuses the existing front-matter mechanism** (`_HEADER_KEYS` in `queue_manager.py`, alongside `model:`/`effort:`/`isolate:`/`provider:`) rather than inventing a second convention. The done-count trick: a cut block's raw text (front matter included) survives verbatim inside the fenced quote `prepend_to_history` writes, so `phase_breakdown()` finds a completed block's phase with one regex pass over the whole history file — no need to re-derive per-entry boundaries the way `_count_top_level_headings`'s fence-awareness does for a different problem (telling two `## ` headings apart).
+- **Documented in three places, matching precedent** ("here, in the bundled template, and in Azymetrix" — same pattern as the `.sandglass/` ownership fix): this repo's `CLAUDE.md` *and* `sandglass/templates/CLAUDE.md` (an exact mirror, block-writing section included) both got the `phase:` bullet; `README.md` and `master_plan/user_manual.md` got the CLI-level version for projects that don't read this repo's own `CLAUDE.md`.
+- Status badge reuses `run_report.effective_reason()` — caught before shipping that it returns the *specific* stop reason (`quota`, `error`, ...) for a stopped run, not the generic `STATUS_STOPPED`, so the color map keys on every `REASON_*` constant, not the status one.
+
+### 3. Next Steps (For the next agent)
+- Not yet exercised against a real multi-hour `sandglass execute` run — only unit tests and one manual smoke test (fixture data, `--no-open`). Worth watching the first real run for whether the 8s refresh is intrusive or right, and whether phase names drift (case-sensitive, exact-match only — `Phase 1` and `phase 1` count as different phases, called out in the docs but not enforced in code).
+- Left version at 0.10.0 / CHANGELOG `[Unreleased]` rather than cutting a release — this project's own convention (seen at 0.9.0→0.10.0) is to batch several changes before bumping, and nothing forced an immediate release this time.
+
 ## 2026-08-14 - Claude (Sonnet 5) - `CLINE: STOP` was inverting a Claude-only safety marker into DeepSeek routing
 
 ### 1. Context Snapshot

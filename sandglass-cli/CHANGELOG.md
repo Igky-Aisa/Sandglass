@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`sandglass dashboard`** — a visual status page, not just `Progress.md`'s text summary: overall progress as a ring, run status (idle/running/waiting/stopped-with-reason, reusing `run_report`), and a per-phase breakdown. Static HTML written to `.sandglass/dashboard.html` and opened in the browser — deliberately not served, so there's no port and no background process to manage. Stays current two ways: `sandglass execute` rewrites the file after every completed block (the same hook that updates `Progress.md`), and the page itself reloads on an 8-second timer, so a tab left open during a run keeps catching up with zero clicks.
+- **`phase:` front matter**, alongside `model:`/`effort:`/`isolate:`/`provider:` — a block can now say which stage of the project's own plan it belongs to (`phase: 8`, `phase: Causal stage automation`). Purely descriptive; nothing about execution reads it. New `prompt_source.phase_breakdown()` derives done/remaining per phase straight from each block's own front matter, both still-queued (`future_prompts.md`) and archived (its front matter survives verbatim inside the fenced quote `prepend_to_history` writes) — no separate bookkeeping, and a project that never declares a phase just gets no phase chart rather than a misleading single bucket.
+
 ## [0.10.0] - 2026-08-14
 
 ### Fixed

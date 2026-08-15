@@ -20,7 +20,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from . import notify, project_docs, prompt_source, providers, run_report, workspace
+from . import dashboard, notify, project_docs, prompt_source, providers, run_report, workspace
 from .accounts import AccountPool
 from .claude_client import ClaudeClient, QuotaExceededError
 from .models import ExecutionResult, PromptObject, Response
@@ -1632,6 +1632,11 @@ class ExecutionEngine:
             done_label=f"`{os.path.relpath(history_path, project_dir).replace(os.sep, '/')}`",
             remaining_label=f"`{os.path.relpath(source_path, project_dir).replace(os.sep, '/')}`",
         )
+        # Rewritten every block, not just on a 5% milestone -- unlike the ntfy
+        # push below, a tab left open on the dashboard has no other way to
+        # learn the run kept going, since its own refresh timer just re-reads
+        # whatever this last wrote.
+        dashboard.write(prompt.origin_file, os.path.basename(project_dir), storage=self.storage)
 
         milestone = (pct // 5) * 5
         if milestone <= 0:

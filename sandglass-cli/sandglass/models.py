@@ -44,6 +44,13 @@ class PromptObject:
     # the agent reads to a third party, so it is never inferred: a block leaves
     # Anthropic only when its author wrote a marker saying it may.
     provider: str | None = None
+    # Which stage of the project's own plan this block belongs to, in whatever
+    # words the plan itself uses (`phase: 8`, `phase: Causal stage automation`).
+    # Purely descriptive -- nothing about execution reads it -- it exists so
+    # `prompt_source.phase_breakdown` and `sandglass dashboard` can report
+    # done/remaining per phase instead of only one overall total. None for a
+    # project (or a block) that doesn't use phases.
+    phase: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -63,6 +70,7 @@ class PromptObject:
             session_id=data.get("session_id"),
             isolate=bool(data.get("isolate", False)),
             provider=data.get("provider"),
+            phase=data.get("phase"),
         )
 
 

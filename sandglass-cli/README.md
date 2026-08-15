@@ -142,6 +142,7 @@ for any single command.
 | `sandglass execute --on-refusal MODE` | `ask` (default) asks a block that wrote nothing whether it was DONE / BLOCKED / NOOP, and keeps going unless blocked; `stop` always stops |
 | `sandglass execute --no-skip-executed` | Send blocks even when they were already executed and cut by someone else |
 | `sandglass why` | Why the last run stopped — or what it's doing right now (see below) |
+| `sandglass dashboard [--source FILE] [--no-open]` | Write a visual status page (progress, phases, run state) to `.sandglass/dashboard.html` and open it (see below) |
 | `sandglass rotate-logs [--keep N]` | Archive old `work_log.md` / `prompt_history.md` entries into `master_plan/archive/` |
 | `sandglass update [--check]` | Update Sandglass itself from the git repo (see Updating below) |
 
@@ -165,6 +166,21 @@ It distinguishes the endings that look alike from the outside: a quota **wait**
 in progress, a Ctrl-C, a crash, a block that produced no work product, and — the
 one nothing else can tell you — a run **killed from outside** (closed terminal,
 sleeping machine) that never got to write down why it vanished.
+
+#### `sandglass dashboard`
+
+A nicer view of the same data `Progress.md` and the 5%-milestone push already
+have — a self-contained HTML page (progress ring, overall done/remaining/
+total, run status, and a per-phase breakdown when blocks declare a `phase:`
+front-matter field) written to `.sandglass/dashboard.html` and opened in your
+browser. It's static, not served — no port, no background process — and stays
+current because `sandglass execute` rewrites the file after every completed
+block and the page itself reloads on a short timer, so a tab left open during
+a run keeps catching up on its own.
+
+The phase breakdown only appears once at least one block in the project sets
+`phase:` (see [How to write a block](#per-prompt-model-and-effort) below) —
+projects with no notion of phases just get the overall ring.
 
 ### History & responses
 
@@ -292,6 +308,13 @@ Tier markers map to a model+effort pair (`SONNET` → `sonnet`/`medium`,
 `CHEAP` → `haiku`/`low`); `--no-tiers` ignores them. Prompts with nothing set
 use the CLI defaults. `queue list` and `execute --dry-run` both show what each
 prompt will actually run as.
+
+A block can also declare `phase:` in the same front matter, in whatever words
+the project's own plan uses (`phase: 8`, `phase: Causal stage automation`).
+It changes nothing about execution — it's purely a label `sandglass dashboard`
+groups done/remaining by, so a project can chart progress per stage instead
+of only one overall total. Every block in the same stage needs to spell it
+identically, and a project with no notion of phases can just skip it.
 
 ## Sending a block somewhere other than Anthropic
 

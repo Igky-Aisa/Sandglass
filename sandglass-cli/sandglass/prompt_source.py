@@ -247,6 +247,56 @@ def throughput(source_file: str) -> tuple[int, int, int, int] | None:
     return done, remaining, total, pct
 
 
+# `phase:` is a front-matter key `queue_manager` also recognises (see
+# `_HEADER_KEYS`); this is a separate, read-only reading of the same
+# convention, scoped to a block's own front matter the same way `queue_manager`
+# scopes `model:`/`effort:` -- a leading, unindented `key: value` line.
+_PHASE_LINE_RE = re.compile(r"^phase\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+_PHASE_SCAN_CHARS = 300
+
+
+def _block_phase(text: str) -> str | None:
+    """The `phase:` front-matter value near the top of one block's raw text,
+    or None. Bounded to the same window `queue_manager` uses for its own
+    marker scans, so a `phase:`-looking line deep in a block's prose is never
+    mistaken for front matter."""
+    match = _PHASE_LINE_RE.search(text[:_PHASE_SCAN_CHARS])
+    return match.group(1).strip() if match else None
+
+
+def phase_breakdown(source_file: str) -> dict[str, tuple[int, int]]:
+    """``{phase: (done, remaining)}``, in first-seen order, derived purely
+    from each block's own `phase:` front matter -- the same field
+    `queue_manager.QueueManager.add_prompt` reads into `PromptObject.phase`.
+
+    Returns ``{}`` when no block anywhere declares a phase, so a project that
+    has never adopted the convention gets no chart rather than a misleading
+    single "None" bucket.
+
+    A completed block's front matter survives verbatim inside the fenced
+    quote `prepend_to_history` writes (cutting a block preserves its raw
+    text), so a single pass over the whole history file finds every
+    completed block's `phase:` line without needing to re-derive per-entry
+    boundaries -- fence-aware entry splitting solves a different problem
+    (telling two completion headings apart), not this one.
+    """
+    counts: dict[str, list[int]] = {}
+    for block in read_blocks(source_file):
+        phase = _block_phase(block["text"])
+        if phase is not None:
+            counts.setdefault(phase, [0, 0])[1] += 1
+
+    history_path = history_path_for(source_file)
+    if os.path.exists(history_path):
+        with open(history_path, "r", encoding="utf-8") as fh:
+            history_text = fh.read()
+        for match in _PHASE_LINE_RE.finditer(history_text):
+            phase = match.group(1).strip()
+            counts.setdefault(phase, [0, 0])[0] += 1
+
+    return {phase: (done, remaining) for phase, (done, remaining) in counts.items()}
+
+
 def history_path_for(source_file: str) -> str:
     """The sibling history file a source file's completed blocks get archived to."""
     return os.path.join(os.path.dirname(source_file) or ".", "prompt_history.md")

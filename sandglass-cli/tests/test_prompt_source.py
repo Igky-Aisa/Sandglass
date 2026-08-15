@@ -220,3 +220,64 @@ def test_throughput_missing_history_file_counts_as_zero_done(tmp_path):
     source = _write(tmp_path / "future_prompts.md", "Only block\n")
     # No prompt_history.md written at all.
     assert throughput(source) == (0, 1, 1, 0)
+
+
+# --- phase_breakdown -------------------------------------------------------
+
+
+def test_phase_breakdown_is_empty_when_no_block_declares_a_phase(tmp_path):
+    source = _write(tmp_path / "future_prompts.md", "Just a plain block\n")
+    assert prompt_source.phase_breakdown(source) == {}
+
+
+def test_phase_breakdown_counts_remaining_from_queued_blocks(tmp_path):
+    source = _write(
+        tmp_path / "future_prompts.md",
+        "phase: Phase 1\n\nFirst\n\n====\n\nphase: Phase 1\n\nSecond\n\n====\n\nphase: Phase 2\n\nThird\n",
+    )
+    assert prompt_source.phase_breakdown(source) == {
+        "Phase 1": (0, 2),
+        "Phase 2": (0, 1),
+    }
+
+
+def test_phase_breakdown_counts_done_from_history(tmp_path):
+    source = str(tmp_path / "future_prompts.md")  # nothing queued
+    _write(
+        tmp_path / "prompt_history.md",
+        "# History\n\n---\n\n"
+        "## Done one\n\n**Executed:** 2026-08-14\n\n```\n"
+        "============================\n\n"
+        "phase: Phase 1\n\nDo the thing.\n\n"
+        "============================\n```\n",
+    )
+    assert prompt_source.phase_breakdown(source) == {"Phase 1": (1, 0)}
+
+
+def test_phase_breakdown_combines_done_and_remaining_for_the_same_phase(tmp_path):
+    source = _write(tmp_path / "future_prompts.md", "phase: Phase 1\n\nStill queued\n")
+    _write(
+        tmp_path / "prompt_history.md",
+        "# History\n\n---\n\n"
+        "## Done one\n\n**Executed:** 2026-08-14\n\n```\n"
+        "============================\n\n"
+        "phase: Phase 1\n\nDo the thing.\n\n"
+        "============================\n```\n",
+    )
+    assert prompt_source.phase_breakdown(source) == {"Phase 1": (1, 1)}
+
+
+def test_phase_breakdown_ignores_blocks_with_no_phase_declared(tmp_path):
+    source = _write(
+        tmp_path / "future_prompts.md",
+        "phase: Phase 1\n\nTagged\n\n====\n\nNo phase here at all\n",
+    )
+    assert prompt_source.phase_breakdown(source) == {"Phase 1": (0, 1)}
+
+
+def test_phase_breakdown_preserves_first_seen_order(tmp_path):
+    source = _write(
+        tmp_path / "future_prompts.md",
+        "phase: Beta\n\nA\n\n====\n\nphase: Alpha\n\nB\n\n====\n\nphase: Beta\n\nC\n",
+    )
+    assert list(prompt_source.phase_breakdown(source).keys()) == ["Beta", "Alpha"]

@@ -17,7 +17,7 @@ _TITLE_MAX = 60
 # Front-matter keys a prompt block may set for itself. Anything else on a
 # leading `key: value` line is treated as prose, not configuration -- a prompt
 # is free to start with "note: ..." without Sandglass reinterpreting it.
-_HEADER_KEYS = ("model", "effort", "isolate", "provider")
+_HEADER_KEYS = ("model", "effort", "isolate", "provider", "phase")
 # Values that make `isolate: <x>` mean "yes". Anything else is read as "no",
 # so a typo degrades to the cheaper default rather than silently opting a
 # block out of the chain.
@@ -168,6 +168,7 @@ class QueueManager:
             if owner is not None:
                 provider = owner.name
         isolate = headers.get("isolate", "").strip().lower() in _TRUTHY
+        phase = headers.get("phase") or None
 
         queue = self.load_queue()
         prompt_id = f"{len(queue) + 1:03d}"
@@ -182,6 +183,7 @@ class QueueManager:
             origin_file=origin_file,
             isolate=isolate,
             provider=provider,
+            phase=phase,
         )
         queue.append(prompt)
         self.save_queue(queue)

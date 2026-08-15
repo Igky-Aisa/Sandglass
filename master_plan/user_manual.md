@@ -300,6 +300,26 @@ and every block ran on the default model no matter what it said.
 `model:`/`effort:` header always beats it. If you'd rather Sandglass ignored
 markers entirely, run `sandglass execute --no-tiers`.
 
+### Tagging a block with its phase
+
+If a project's plan is broken into stages (an MVP phase, a polish phase, and
+so on), a block can say which one it belongs to with a `phase:` header — same
+place as `model:`/`effort:`:
+
+```
+phase: Phase 2 - Polish
+model: sonnet
+
+Add a dark mode toggle.
+```
+
+It doesn't change anything about how the block runs — it exists purely so
+`sandglass dashboard` (§13) can chart done/remaining **per phase**, not just
+one overall number. Spell it the same way on every block in the same stage
+(`Phase 2 - Polish` and `phase 2 - polish` count as different phases). A
+project with no notion of phases can skip this entirely — the dashboard just
+shows the overall total.
+
 ### Running a block on DeepSeek instead of Claude
 
 Some blocks are pure mechanics — a rename across forty files, a batch of
@@ -620,6 +640,7 @@ Sandglass is built so a bad run never loses your queue:
 | `sandglass history` | Show everything ever completed, with tokens and cost |
 | `sandglass responses list` | List saved response files |
 | `sandglass responses show INDEX` | Read one saved response in full |
+| `sandglass dashboard [--no-open]` | Write and open a visual status page (see §13) |
 | `sandglass sleeptime` | Show the hours when notifications are silenced (see §13) |
 | `sandglass sleeptime START END` | Set them, e.g. `sandglass sleeptime 22 6` (default 22:00–06:00) |
 | `sandglass sleeptime --off` / `--on` | Silence nothing / restore the saved window |
@@ -826,6 +847,27 @@ Then subscribe to that same topic in the [ntfy Android/iOS app](https://ntfy.sh)
 notification call is a silent no-op. A failed or unreachable ntfy server is handled the
 same way (logged as a warning, never raised) — a notification is a nice-to-have, not
 something that should ever break or stall a queue run.
+
+### A visual dashboard
+
+`Progress.md` and the phone pushes above are both text. If you'd rather glance
+at a status page while a run is going, `sandglass dashboard` writes one:
+
+```bash
+sandglass dashboard              # writes .sandglass/dashboard.html and opens it
+sandglass dashboard --no-open    # just write the file, don't launch a browser
+```
+
+It shows the same overall done/remaining/total as `Progress.md`, plus the
+current run state (idle, running, waiting out a quota, or stopped with why),
+and — if any block in the queue sets a `phase:` (see §4) — a bar per phase
+so you can see which stage of a larger project is furthest along.
+
+It's a plain file, not a running web server: nothing to leave open, nothing
+to remember to shut down. `sandglass execute` rewrites it after every
+completed block, and the page itself reloads every 8 seconds, so a browser
+tab left open during a long run keeps catching up on its own — close it any
+time, reopen it with the command above.
 
 ### Sleep time — silencing notifications overnight
 
