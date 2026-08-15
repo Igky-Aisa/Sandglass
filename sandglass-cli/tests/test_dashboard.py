@@ -118,6 +118,35 @@ def test_generate_escapes_title_and_phase_names(tmp_path, storage):
     assert "<script>alert(1)</script>" not in html
 
 
+# --- hero icon --------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_icon_cache():
+    """`_icon_data_uri` is `lru_cache`d across the whole test session, so a
+    test that points `_ICON_PATH` at a missing file must not leak that
+    negative result into every other test (or vice versa)."""
+    dashboard._icon_data_uri.cache_clear()
+    yield
+    dashboard._icon_data_uri.cache_clear()
+
+
+def test_generate_includes_the_hero_medallion_when_the_icon_is_present(tmp_path, storage):
+    html_out = dashboard.generate(_source(tmp_path), "My Project", storage=storage)
+    assert 'class="medallion"' in html_out
+    assert "data:image/jpeg;base64," in html_out
+
+
+def test_generate_omits_the_hero_gracefully_when_the_icon_is_missing(tmp_path, storage, monkeypatch):
+    monkeypatch.setattr(dashboard, "_ICON_PATH", str(tmp_path / "does-not-exist.jpg"))
+    dashboard._icon_data_uri.cache_clear()
+
+    html_out = dashboard.generate(_source(tmp_path), "My Project", storage=storage)
+
+    assert 'class="medallion"' not in html_out
+    assert "My Project" in html_out  # the rest of the page still renders
+
+
 def test_write_creates_file_under_sandglass_dir(tmp_path, storage):
     source = _source(tmp_path)
     _write(source, "A block\n")

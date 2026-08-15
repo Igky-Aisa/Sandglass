@@ -1,1 +1,2 @@
 recursive-include sandglass/templates *.md
+include sandglass/assets/*.jpg

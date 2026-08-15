@@ -13,7 +13,10 @@ a tab left open during a run keeps catching up without a manual refresh.
 
 from __future__ import annotations
 
+import base64
+import functools
 import html
+import logging
 import os
 import webbrowser
 from datetime import datetime, timezone
@@ -21,8 +24,31 @@ from datetime import datetime, timezone
 from . import prompt_source, run_report
 from .storage import StorageService
 
+logger = logging.getLogger(__name__)
+
 DASHBOARD_FILENAME = "dashboard.html"
 _REFRESH_SECONDS = 8
+
+_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "hourglass_icon.jpg")
+
+
+@functools.lru_cache(maxsize=1)
+def _icon_data_uri() -> str | None:
+    """The brand hourglass icon as a base64 data: URI, or None if it can't be
+    read -- a missing/corrupt asset must not break `sandglass dashboard`
+    itself, so the hero section is simply skipped rather than the page
+    failing to generate. Cached: it's the same ~11KB file on every call
+    within a process, and a long `sandglass execute` run regenerates the
+    dashboard after every block.
+    """
+    try:
+        with open(_ICON_PATH, "rb") as fh:
+            encoded = base64.b64encode(fh.read()).decode("ascii")
+    except OSError as exc:
+        logger.warning("Could not read dashboard icon %s: %s", _ICON_PATH, exc)
+        return None
+    return f"data:image/jpeg;base64,{encoded}"
+
 
 _GREEN = "#22c55e"
 _YELLOW = "#eab308"
@@ -123,6 +149,20 @@ def generate(source_file: str, title: str, storage: StorageService | None = None
 
     phases_section = _phase_rows(phases)
     safe_title = html.escape(title)
+    icon_uri = _icon_data_uri()
+    hero_section = (
+        f"""
+    <section class="hero">
+      <div class="medallion">
+        <div class="halo-spin"></div>
+        <div class="halo-glow"></div>
+        <img src="{icon_uri}" alt="" width="190" height="190">
+      </div>
+    </section>
+    """
+        if icon_uri
+        else ""
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -235,6 +275,49 @@ def generate(source_file: str, title: str, storage: StorageService | None = None
   }}
   .phase-count {{ font-size: 0.8rem; color: var(--muted); min-width: 3.5rem; text-align: right; }}
   footer {{ text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 1rem; }}
+
+  .hero {{ display: flex; justify-content: center; padding: 0.5rem 0 2rem; }}
+  .medallion {{
+    position: relative;
+    width: 190px; height: 190px;
+    animation: sway 6s ease-in-out infinite;
+  }}
+  .medallion img {{
+    position: relative; z-index: 2;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+    display: block;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 22px 45px -15px rgba(0,0,0,0.65);
+  }}
+  .halo-spin {{
+    position: absolute; inset: -28px;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, #2f7d7d, #e0a952, #7c9eff, #2f7d7d);
+    filter: blur(20px);
+    opacity: 0.55;
+    animation: spin 14s linear infinite;
+  }}
+  .halo-glow {{
+    position: absolute; inset: -8px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(224,169,82,0.4), rgba(45,125,125,0.28) 55%, transparent 75%);
+    animation: breathe 4s ease-in-out infinite;
+  }}
+  @keyframes sway {{
+    0%, 100% {{ transform: rotate(-2.5deg); }}
+    50% {{ transform: rotate(2.5deg); }}
+  }}
+  @keyframes spin {{
+    to {{ transform: rotate(360deg); }}
+  }}
+  @keyframes breathe {{
+    0%, 100% {{ transform: scale(0.94); opacity: 0.55; }}
+    50% {{ transform: scale(1.07); opacity: 1; }}
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    .medallion, .halo-spin, .halo-glow {{ animation: none; }}
+  }}
 </style>
 </head>
 <body>
@@ -243,7 +326,7 @@ def generate(source_file: str, title: str, storage: StorageService | None = None
       <h1>{safe_title}</h1>
       <div class="timestamp">Updated {generated_at}</div>
     </header>
-
+    {hero_section}
     <section class="card">
       <h2>Status</h2>
       <span class="badge"><span class="dot"></span>{html.escape(status_label)}</span>
