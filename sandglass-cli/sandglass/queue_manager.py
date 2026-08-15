@@ -67,6 +67,17 @@ _TIER_SCAN_CHARS = 300
 _CLINE_RE = re.compile(
     r"\*{0,2}(?:CLINE|EXTERNAL)\s*:\s*([A-Za-z0-9._\-]+)", re.IGNORECASE
 )
+# Values that mean the opposite of routing, so a human annotation warning a
+# block off external routing (`**CLINE: STOP** — money path, Claude only`)
+# can never be parsed as the routing command it names. Found live: an
+# Azymetrix queue used exactly that phrasing on unattended-order-placement
+# blocks, and the marker inverted it — sent straight to DeepSeek because
+# "STOP" isn't a recognised tier, so it fell through to the default external
+# provider instead of being rejected.
+_CLINE_NEGATIONS = {
+    "stop", "no", "none", "off", "never", "false", "n/a", "na",
+    "claude", "claude-only", "anthropic", "disabled", "disable",
+}
 # Which provider a bare tier name means. Only one external provider is wired up
 # (see providers.py), so `CLINE: pro` needs no vendor name -- but a block that
 # does name one (`CLINE: deepseek-v4-pro`) still routes correctly, because the
@@ -318,12 +329,18 @@ class QueueManager:
         (`deepseek`) to take its default model. An unrecognised value is
         forwarded to the provider rather than rejected here: model names are
         the vendor's to change, and failing a block over a name Sandglass
-        hasn't heard of would age worse than passing it through.
+        hasn't heard of would age worse than passing it through -- except for
+        `_CLINE_NEGATIONS`, checked first, which are never forwarded: those
+        are the one class of "unrecognised value" that is actually a human
+        telling Sandglass NOT to route, and forwarding one would silently do
+        the opposite of what it says.
         """
         match = _CLINE_RE.search(text[:_TIER_SCAN_CHARS])
         if not match:
             return None, None
         value = match.group(1).strip()
+        if value.lower() in _CLINE_NEGATIONS:
+            return None, None
 
         named = providers.get(value)
         if named is not None:  # `CLINE: deepseek`

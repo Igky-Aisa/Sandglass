@@ -2,7 +2,23 @@
 
 > Older entries live in `master_plan/archive/work_log_archive_2026-08-14.md`. This file keeps the most recent 5 so reading it stays cheap; consult the archive only when you need history older than that.
 
-## 2026-08-14 - Claude (Sonnet 5) - ntfy "arriving all at once in the evening" — diagnosed, not a code bug
+## 2026-08-14 - Claude (Sonnet 5) - `CLINE: STOP` was inverting a Claude-only safety marker into DeepSeek routing
+
+### 1. Context Snapshot
+- **Goal**: User asked why a block explicitly labeled `**TIER: OPUS**` in a live Azymetrix run was showing "Sending to deepseek" in the console.
+- **State**: `sandglass-cli/sandglass/queue_manager.py` (`_CLINE_NEGATIONS`, `_external_defaults`); `sandglass-cli/tests/test_providers.py`.
+- **Previous Blocker**: none.
+
+### 2. Work Done
+- **Root cause: `_CLINE_RE` matches any word after `CLINE:`/`EXTERNAL:`, with no concept of "no."** Azymetrix's queue used `**CLINE: STOP** — OPUS tier: money path... Claude only` as a plain-English warning against external routing. Sandglass parsed it as the opposite: `CLINE: <value>` unconditionally means "route externally," and "STOP" isn't a known tier, so `_external_defaults` fell through to the default provider (deepseek) anyway. `model: opus` front matter survived (model precedence beats the tier marker), but `provider` is decided independently — so the block still shipped to DeepSeek, where "opus" resolved via DeepSeek's own tier map to `deepseek-v4-pro`. Confirmed live: block 7/21 (unattended order placement) had already run this way and billed $7.55; block 8/21 (crash-resume, money path) was mid-run on DeepSeek when caught. 8 more `CLINE: STOP` blocks were still queued.
+- **Fix: `_CLINE_NEGATIONS`**, a denylist (`stop`, `no`, `none`, `off`, `never`, `claude-only`, etc.) checked before the value is resolved to a provider — a negation never routes, full stop, rather than being "forwarded to the provider" like a genuinely unrecognised tier name would be. Scoped to the parser so every project sharing this CLI is protected, not just Azymetrix's queue file.
+- Regression tests pin the exact failing phrase plus a parametrized sweep of negation words (`test_providers.py`).
+
+### 3. Next Steps (For the next agent)
+- **Not yet deployed to wherever Azymetrix's `sandglass execute` was actually running from** — this fix lives in this repo's `sandglass-cli/`; confirm which installed copy that Azymetrix run uses (editable install vs. a separate checkout) before assuming the live run is safe now.
+- The 8 `CLINE: STOP` blocks still in Azymetrix's `future_prompts.md` were left as-is (user chose the code fix, not a reword) — they're safe now under the patched parser, but the wording itself still reads like a routing marker to a human; worth flagging to whoever owns that project.
+
+
 
 ### 1. Context Snapshot
 - **Goal**: User reported ntfy pushes seem to batch up and land all at once in the evening instead of in the moment.

@@ -150,6 +150,24 @@ def test_provider_front_matter_beats_a_marker(qm):
     assert added.model == "deepseek-v4-pro"
 
 
+def test_cline_stop_is_a_refusal_not_a_routing_command(qm):
+    """A human warning off external routing (`**CLINE: STOP** — Claude only`)
+    must never be parsed as the routing command it names — found live on an
+    Azymetrix queue where this exact phrasing sent unattended, money-path
+    blocks to DeepSeek instead of keeping them on Claude."""
+    text = "**CLINE: STOP** — money path, concurrency, crash recovery. Claude only.\n\nDo it."
+    added = qm.get_prompt(int(qm.add_prompt(text=text)))
+    assert added.provider is None
+
+
+@pytest.mark.parametrize(
+    "value", ["stop", "STOP", "no", "off", "none", "never", "claude-only", "disabled"]
+)
+def test_cline_negation_values_never_route(qm, value):
+    added = qm.get_prompt(int(qm.add_prompt(text=f"**CLINE: {value}**\n\nDo it.")))
+    assert added.provider is None
+
+
 def test_an_ordinary_block_never_leaves_anthropic(qm):
     added = qm.get_prompt(int(qm.add_prompt(text="Add a badge to the editor.")))
     assert added.provider is None
