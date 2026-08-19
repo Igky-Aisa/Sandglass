@@ -9,12 +9,14 @@ disclose code if they are wrong.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
 from sandglass.accounts import Account, AccountPool
+from sandglass.claude_client import ProviderCreditExhaustedError
 from sandglass.execution_engine import ExecutionEngine
-from sandglass.models import Response
+from sandglass.models import ExecutionResult, Response
 from sandglass.providers import ProviderRegistry
 from sandglass.queue_manager import QueueManager
 from sandglass.storage import StorageService
@@ -215,3 +217,159 @@ def test_the_model_sent_externally_is_the_providers_own(qm):
     asyncio.run(_engine(qm, client).execute_queue())
 
     assert client.calls[0]["model"] == "deepseek-v4-pro"
+
+
+# --- Out of credit ---------------------------------------------------------
+#
+# A vendor refusing for money is a different animal from a rate limit, and the
+# difference is the whole point of these: a quota comes back on a clock, so
+# waiting is right; a balance of zero comes back when a human pays, so waiting
+# is doing nothing all night. The run has to keep moving instead — and only
+# fall back to *waiting* when there is genuinely nowhere left to send work.
+
+_FIRST_KEY = "sk-first-key-1234567890"
+_SECOND_KEY = "sk-second-key-123456789"
+
+
+class _NoCreditClient(_RecordingClient):
+    """Refuses external calls with DeepSeek's own 402 wording; Claude works."""
+
+    auth_token = None
+
+    def __init__(self, dead_keys=None):
+        super().__init__()
+        # None means every key is dead; a set names the ones that are.
+        self.dead_keys = dead_keys
+
+    async def send_prompt(self, text, on_chunk=None, provider=None, **kwargs):
+        if provider is not None and (
+            self.dead_keys is None or provider[1] in self.dead_keys
+        ):
+            # Recorded before raising: the attempt is exactly what these tests
+            # are counting.
+            self.calls.append({
+                "text": text,
+                "model": kwargs.get("model"),
+                "resume_session_id": kwargs.get("resume_session_id"),
+                "persist_session": kwargs.get("persist_session"),
+                "provider": provider,
+            })
+            raise ProviderCreditExhaustedError(
+                "API Error: 402 Insufficient Balance",
+                provider_name=provider[0].name,
+            )
+        return await super().send_prompt(text, on_chunk, provider=provider, **kwargs)
+
+
+def test_a_second_key_is_tried_before_the_vendor_is_written_off(qm):
+    qm.add_prompt(text="**CLINE: pro**\n\nCheap task.")
+    client = _NoCreditClient(dead_keys={_FIRST_KEY})
+
+    result = asyncio.run(
+        _engine(
+            qm, client, provider_registry=_registry(deepseek=[_FIRST_KEY, _SECOND_KEY])
+        ).execute_queue()
+    )
+
+    assert result.completed == 1
+    # Same block, same vendor, the next key -- not a fallback to Claude, which
+    # would spend subscription quota while a funded key sat unused.
+    assert [c["provider"][1] for c in client.calls] == [_FIRST_KEY, _SECOND_KEY]
+
+
+def test_a_vendor_with_no_credit_left_falls_back_to_claude(qm):
+    """The queue must not stop over someone else's empty wallet: the block
+    describes work Claude can do, and a 402 says nothing about Claude."""
+    qm.add_prompt(text="**CLINE: pro**\n\nCheap task.")
+    client = _NoCreditClient()
+
+    result = asyncio.run(_engine(qm, client).execute_queue())
+
+    assert result.completed == 1
+    assert result.stopped_reason is None
+    attempted, retried = client.calls
+    assert attempted["provider"][0].name == "deepseek"
+    assert retried["provider"] is None
+    # And the Claude retry asks for a Claude model, not deepseek-v4-pro.
+    assert retried["model"] == client.model
+
+
+def test_a_dead_vendor_is_not_re_probed_by_every_later_block(qm):
+    qm.add_prompt(text="**CLINE: pro**\n\nFirst cheap task.")
+    qm.add_prompt(text="**CLINE: flash**\n\nSecond cheap task.")
+    client = _NoCreditClient()
+
+    result = asyncio.run(_engine(qm, client).execute_queue())
+
+    assert result.completed == 2
+    external = [c for c in client.calls if c["provider"] is not None]
+    assert len(external) == 1  # the block that discovered it, and no other
+
+
+def test_no_credit_and_no_quota_left_waits_instead_of_failing(qm):
+    """The one case where waiting *is* right: nothing has anywhere to run. It
+    is reported as a quota stop so the run takes the path that already exists
+    for that -- the hourglass wait, then a retry -- rather than dying with an
+    error nobody is awake to read."""
+    reset = time.time() + 3600
+    pool = AccountPool(accounts=[
+        Account(name="a", token="t" * 40, exhausted_until=reset),
+        Account(name="b", token="u" * 40, exhausted_until=reset + 600),
+    ])
+    qm.add_prompt(text="**CLINE: pro**\n\nCheap task.")
+
+    result = asyncio.run(
+        _engine(qm, _NoCreditClient(), account_pool=pool).execute_queue()
+    )
+
+    assert result.stopped_reason == "quota"
+    assert result.resume_at  # the earliest account back, not "never"
+    assert result.completed == 0
+
+
+def test_the_fallback_lands_on_an_account_that_still_has_quota(qm):
+    pool = AccountPool(accounts=[
+        Account(name="spent", token="t" * 40, exhausted_until=time.time() + 3600),
+        Account(name="fresh", token="u" * 40),
+    ])
+    qm.add_prompt(text="**CLINE: pro**\n\nCheap task.")
+    client = _NoCreditClient()
+
+    result = asyncio.run(_engine(qm, client, account_pool=pool).execute_queue())
+
+    assert result.completed == 1
+    assert client.auth_token == "u" * 40
+    assert pool.current_name == "fresh"
+
+
+def test_a_long_wait_gives_the_vendor_another_chance(qm, monkeypatch):
+    """A quota wait runs for hours and the out-of-credit push went to a phone
+    at the start of it, so this is the one moment a top-up is plausible.
+    Asking costs one instant refusal; not asking spends the night's Claude
+    quota on blocks that were meant to be cheap."""
+    registry = _registry(deepseek=_FIRST_KEY)
+    registry.mark_out_of_credit("deepseek")
+    assert registry.is_out_of_credit("deepseek")
+
+    qm.add_prompt(text="A task.")
+    engine = _engine(qm, _RecordingClient(), provider_registry=registry)
+
+    # One quota stop, then a clean drain -- the shape of a real overnight wait,
+    # without the hours.
+    passes = [ExecutionResult(stopped_reason="quota")]
+
+    async def fake_execute_queue():
+        if passes:
+            return passes.pop()
+        for queued in qm.load_queue():
+            qm.remove_prompt_entry(queued)
+        return ExecutionResult(completed=1)
+
+    async def no_sleep(total_seconds, resume_at):
+        return None
+
+    monkeypatch.setattr(engine, "execute_queue", fake_execute_queue)
+    monkeypatch.setattr(engine, "_sleep_with_animation", no_sleep)
+    asyncio.run(engine.run_with_auto_resume())
+
+    assert registry.key_for("deepseek") == _FIRST_KEY

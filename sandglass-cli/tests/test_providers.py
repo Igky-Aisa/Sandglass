@@ -302,3 +302,89 @@ def test_get_is_case_insensitive_and_safe_on_nonsense():
     assert providers.get("not-a-vendor") is None
     assert providers.get(None) is None
     assert providers.get("") is None
+
+
+# --- Running out of credit ------------------------------------------------
+#
+# A metered key doesn't hit a quota, it hits a balance of zero — and no amount
+# of waiting refills it. So the registry's job here is to know which key is in
+# use, retire the one that just refused, and be honest about the moment there
+# is nothing left to move to.
+
+
+def test_several_keys_load_and_are_used_in_the_order_written(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text(
+        json.dumps({"deepseek": {"api_keys": ["sk-first-1234567890", "sk-second-123456789"]}})
+    )
+    registry = providers.ProviderRegistry.load(path)
+
+    assert registry.key_count("deepseek") == 2
+    assert registry.key_for("deepseek") == "sk-first-1234567890"
+    assert registry.mark_out_of_credit("deepseek") == "sk-second-123456789"
+    assert registry.key_for("deepseek") == "sk-second-123456789"
+    assert not registry.is_out_of_credit("deepseek")
+
+
+def test_the_last_key_running_dry_writes_the_vendor_off_for_the_run():
+    registry = providers.ProviderRegistry(keys={"deepseek": "sk-only-key-1234567890"})
+
+    assert registry.mark_out_of_credit("deepseek") is None
+    assert registry.is_out_of_credit("deepseek")
+    # None, not the dead key: the engine reads this as "send it to Claude",
+    # and handing back a key that just refused would loop instead.
+    assert registry.key_for("deepseek") is None
+    assert not registry.has("deepseek")
+
+
+def test_credit_state_never_reaches_disk(tmp_path, monkeypatch):
+    """An empty balance is undone by a human paying, not by time — so persisting
+    it would bench a freshly-funded key on the next run for no reason."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps({"deepseek": {"api_key": "sk-only-key-1234567890"}}))
+
+    spent = providers.ProviderRegistry.load(path)
+    spent.mark_out_of_credit("deepseek")
+    assert spent.is_out_of_credit("deepseek")
+
+    assert providers.ProviderRegistry.load(path).key_for("deepseek") == "sk-only-key-1234567890"
+
+
+def test_restore_credit_names_what_it_revived():
+    registry = providers.ProviderRegistry(keys={"deepseek": ["sk-a-key-1234567890", "sk-b-key-1234567890"]})
+    registry.mark_out_of_credit("deepseek")
+    registry.mark_out_of_credit("deepseek")
+
+    assert registry.restore_credit() == ["deepseek"]
+    # Back to the first key, not to wherever the rotation had got to.
+    assert registry.key_for("deepseek") == "sk-a-key-1234567890"
+    assert registry.restore_credit() == []
+
+
+def test_an_empty_key_list_is_an_error_not_a_silent_no_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps({"deepseek": {"api_keys": []}}))
+    with pytest.raises(providers.ProvidersError):
+        providers.ProviderRegistry.load(path)
+
+
+@pytest.mark.parametrize(
+    "text,credit",
+    [
+        # DeepSeek's own wording, verbatim from a run that stopped a queue.
+        ("API Error: 402 Insufficient Balance", True),
+        ("Your credit balance is too low to run this request", True),
+        ("Error code: 429 - insufficient_quota", True),
+        ("You've hit your weekly limit · resets Aug 20, 6am", False),
+        ("rate limit exceeded", False),
+        # A bare 402 with no money word is not evidence: it turns up in ids.
+        ("model claude-402-preview not found", False),
+    ],
+)
+def test_a_refusal_about_money_is_told_apart_from_one_about_speed(text, credit):
+    from sandglass.claude_client import ClaudeClient
+
+    assert ClaudeClient._looks_like_credit_error(text) is credit

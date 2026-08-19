@@ -49,6 +49,20 @@ DEFAULT_PERMISSION_MODE = "bypassPermissions"
 # raised well above any realistic single-event size.
 STREAM_BUFFER_LIMIT = 10 * 1024 * 1024
 
+# Wordings that mean "this account has no money left", as opposed to "you are
+# going too fast". Kept as text because that is the only form the refusal
+# reaches us in -- see ClaudeClient._looks_like_credit_error.
+_CREDIT_ERROR_MARKERS = (
+    "insufficient balance",
+    "insufficient funds",
+    "insufficient credit",
+    "insufficient_quota",
+    "credit balance is too low",
+    "exceeded your current quota",
+    "payment required",
+    "out of credit",
+)
+
 
 class ClaudeCLINotFoundError(RuntimeError):
     """Raised when the `claude` binary isn't on PATH."""
@@ -91,6 +105,37 @@ class QuotaExceededError(RuntimeError):
         if self.rate_limit_info:
             return self.rate_limit_info.get("resetsAt")
         return None
+
+
+class ProviderCreditExhaustedError(RuntimeError):
+    """Raised when an external endpoint refuses because the money ran out.
+
+    Deliberately *not* a :class:`QuotaExceededError`. A subscription quota is a
+    clock: it comes back on its own, so waiting is the correct response and the
+    hourglass wait exists for exactly that. A prepaid balance is not a clock --
+    it comes back when a human tops the account up -- so waiting for it is
+    waiting for nothing. The right response is to move to the vendor's next key,
+    or off that vendor entirely, which is what
+    ``ExecutionEngine._execute_with_rotation`` does with this.
+
+    Only ever raised for a **routed** block. Anthropic answering "credit balance
+    is too low" means that *account* is finished, not that a vendor is, and the
+    account pool's rotate-then-wait path already handles that shape -- so it is
+    reported as a quota hit instead. See :meth:`ClaudeClient.send_prompt`.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        provider_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ):
+        super().__init__(message)
+        self.provider_name = provider_name
+        # Same reason QuotaExceededError carries one: the refusal interrupts
+        # work that was never done, and the retry (on another key, or on
+        # Claude) should continue the conversation rather than start cold.
+        self.session_id = session_id
 
 
 class SessionNotResumableError(RuntimeError):
@@ -338,6 +383,21 @@ class ClaudeClient:
 
         if error_text is not None:
             logger.error("claude CLI reported an error: %s", error_text)
+            if self._looks_like_credit_error(error_text):
+                if provider is not None:
+                    raise ProviderCreditExhaustedError(
+                        error_text,
+                        provider_name=provider[0].name,
+                        session_id=observed_session_id or resume_session_id,
+                    )
+                # Anthropic itself out of credit is a spent *account*, which is
+                # the shape the pool already knows how to handle: rotate to the
+                # next one, and wait only when there is no next one.
+                raise QuotaExceededError(
+                    error_text,
+                    rate_limit_info=rate_limit_info,
+                    session_id=observed_session_id or resume_session_id,
+                )
             if self._looks_like_quota_error(error_text, rate_limit_info):
                 raise QuotaExceededError(
                     error_text,
@@ -431,6 +491,24 @@ class ClaudeClient:
                 "already exists", "already in use", "in use", "duplicate",
                 "locked", "cannot be resumed", "could not be resumed",
             )
+        )
+
+    @staticmethod
+    def _looks_like_credit_error(text: str) -> bool:
+        """Whether this refusal is about money rather than about a rate limit.
+
+        Matched on the wording because that is all there is: the error reaches
+        Sandglass as the CLI's one-line string, with no status code of its own
+        (DeepSeek's balance refusal arrives as the literal
+        ``API Error: 402 Insufficient Balance``). A bare ``402`` is not enough
+        on its own -- it turns up inside model names and ids -- so it only
+        counts alongside a word about money.
+        """
+        lowered = (text or "").lower()
+        if any(marker in lowered for marker in _CREDIT_ERROR_MARKERS):
+            return True
+        return "402" in lowered and any(
+            word in lowered for word in ("balance", "credit", "payment", "fund")
         )
 
     @staticmethod

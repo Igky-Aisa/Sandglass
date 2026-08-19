@@ -2,6 +2,23 @@
 
 > Older entries live in `master_plan/archive/work_log_archive_2026-08-15.md`. This file keeps the most recent 5 so reading it stays cheap; consult the archive only when you need history older than that.
 
+## 2026-08-18 - Opus 5 - A DeepSeek 402 killed a run that had somewhere else to go
+
+### 1. Context Snapshot
+- **Goal**: `API Error: 402 Insufficient Balance` should rotate, then fall back, then wait — not stop the batch.
+- **State**: `sandglass/providers.py`, `claude_client.py`, `execution_engine.py`, `cli.py`; tests in `test_providers.py` / `test_external_routing.py`.
+- **Previous Blocker**: Resolved. A live run stopped at block 5/8 after 82 minutes with three blocks queued and the night still ahead.
+
+### 2. Work Done
+- **Credit exhaustion is a different failure from a quota hit, so it gets its own exception.** `ProviderCreditExhaustedError` is deliberately not a `QuotaExceededError`: a quota returns on a clock and waiting is correct; a zero balance returns when a human pays, so waiting is doing nothing all night. `_looks_like_quota_error` never matched the 402 string, which is why it fell through to the generic-error stop.
+- **Fallback chain in `_execute_with_rotation`**: the vendor's next key → Anthropic (via `_switch_to_available_account`, which also skips a parked account) → and only if the pool is empty too, a `QuotaExceededError` so the run enters the *existing* hourglass wait instead of dying. That last conversion is the whole reason the wait path didn't need duplicating.
+- **A provider may now hold several keys** (`api_keys: [...]`, `providers set --add`), drained in file order. Without that, one empty wallet puts every cheap block back on the subscription quota the routing existed to protect.
+- **Credit state is per-run only**, unlike `accounts_state.json`: persisting it would bench a topped-up key on the next run. Same reasoning drives re-offering retired keys after a quota wait — the push went to a phone hours earlier, and a refusal costs nothing.
+
+### 3. Next Steps (For the next agent)
+- **Not verified against a live 402** — detection is string-matched (`claude_client._looks_like_credit_error`) because the CLI hands us only its one-line error text. If DeepSeek rewords it, the run reverts to the old generic-error stop. Worth confirming the exact wording next time a key runs dry.
+- `_looks_like_credit_error` treats an Anthropic credit refusal as a quota hit, which parks that account for the 1h default cooldown. If a pay-per-token account ever runs a queue, that cooldown is wrong (it never refreshes) — decide then whether a spent account should leave the pool entirely.
+
 ## 2026-08-14 - Opus 5 - The artifact gate was archiving refusals as successes
 
 ### 1. Context Snapshot

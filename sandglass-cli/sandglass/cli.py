@@ -707,6 +707,7 @@ def execute(
         account_pool=pool,
         provider_registry=registry,
         allow_external=external,
+        tiers=tiers,
     )
     try:
         if once:
@@ -987,10 +988,15 @@ def providers_list() -> None:
 
     for name, provider in sorted(providers_mod.PROVIDERS.items()):
         key = registry.key_for(name) if registry else None
+        count = registry.key_count(name) if registry else 0
         if key:
             problem = providers_mod.looks_malformed(key)
+            # The count matters operationally: with one key, a vendor running
+            # out of credit mid-run puts every block marked for it back on
+            # Claude quota. With two, the run just moves to the second.
+            configured = f"{count} keys configured" if count > 1 else "key configured"
             mark = (
-                "[green]●[/green] key configured" if not problem
+                f"[green]●[/green] {configured}" if not problem
                 else f"[yellow]○[/yellow] key looks wrong: {problem}"
             )
         else:
@@ -1006,6 +1012,24 @@ def providers_list() -> None:
         "[cyan]**CLINE: pro**[/cyan] (or [cyan]provider: deepseek[/cyan]) near the "
         "top of the block. Unmarked blocks always run on Anthropic.[/dim]"
     )
+    console.print(
+        "[dim]Out of credit mid-run? The run moves to that vendor's next key "
+        "([cyan]sandglass providers set <name> --add[/cyan]), then falls back to "
+        "Claude — and only waits if Claude has no quota either.[/dim]"
+    )
+
+
+def _stored_keys(entry: object) -> list[str]:
+    """The keys a providers-file entry already holds, in the order written."""
+    if isinstance(entry, dict):
+        raw = entry.get("api_keys", entry.get("api_key"))
+    else:
+        raw = entry
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list):
+        return [k for k in raw if isinstance(k, str) and k.strip()]
+    return []
 
 
 @providers_app.command("set")
@@ -1014,6 +1038,14 @@ def providers_set(
     api_key: str = typer.Option(
         ..., "--key", prompt=True, hide_input=True,
         help="The provider's API key. Prompted for (hidden) if not passed.",
+    ),
+    add: bool = typer.Option(
+        False, "--add",
+        help=(
+            "Keep the keys already stored and add this one after them. A run "
+            "that exhausts one key's balance moves to the next instead of "
+            "falling back to Claude quota."
+        ),
     ),
 ) -> None:
     """Store an API key for an external provider, outside the project tree.
@@ -1050,13 +1082,25 @@ def providers_set(
     # Preserve whichever shape the file is already in, so this never silently
     # rewrites a hand-authored file into the other one.
     target = existing.setdefault("providers", {}) if "providers" in existing else existing
-    target[provider.name] = {"api_key": api_key}
+    if add:
+        kept = _stored_keys(target.get(provider.name))
+        if api_key in kept:
+            console.print(f"[yellow]That key is already stored for '{provider.name}'.[/yellow]")
+            raise typer.Exit(code=0)
+        target[provider.name] = {"api_keys": kept + [api_key]}
+    else:
+        target[provider.name] = {"api_key": api_key}
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     if os.name != "nt":
         os.chmod(path, 0o600)
-    console.print(f"[green]✓ Key stored for '{provider.name}' in {path}[/green]")
+    stored = len(_stored_keys(target.get(provider.name)))
+    console.print(
+        f"[green]✓ Key stored for '{provider.name}' in {path}"
+        + (f" ({stored} keys total)" if stored > 1 else "")
+        + "[/green]"
+    )
     console.print(
         f"[dim]Blocks marked [cyan]**CLINE: pro**[/cyan] now run on "
         f"{provider.tiers['pro']} instead of consuming Claude quota.[/dim]"

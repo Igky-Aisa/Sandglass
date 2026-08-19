@@ -22,7 +22,11 @@ from rich.text import Text
 
 from . import dashboard, notify, project_docs, prompt_source, providers, run_report, workspace
 from .accounts import AccountPool
-from .claude_client import ClaudeClient, QuotaExceededError
+from .claude_client import (
+    ClaudeClient,
+    ProviderCreditExhaustedError,
+    QuotaExceededError,
+)
 from .models import ExecutionResult, PromptObject, Response
 from .queue_manager import QueueManager
 from .storage import StorageService
@@ -402,6 +406,7 @@ class ExecutionEngine:
         account_pool: "AccountPool | None" = None,
         provider_registry: "providers.ProviderRegistry | None" = None,
         allow_external: bool = True,
+        tiers: bool = True,
     ):
         self.queue_manager = queue_manager
         self.claude_client = claude_client
@@ -454,6 +459,13 @@ class ExecutionEngine:
         # Providers already reported as unusable this run, so a queue with
         # twenty externally-marked blocks says so once instead of twenty times.
         self._provider_warned: set[str] = set()
+        # Honour `TIER:`-style markers on blocks re-imported after a quota wait,
+        # matching what the initial markdown import did — a mismatch here would
+        # silently change a recovered block's model/effort.
+        self.tiers = tiers
+        # Markdown queue sources backing this run, captured as prompts load so a
+        # quota wait can re-import whatever the queue file lost mid-run.
+        self._markdown_sources: list[str] = []
 
     # --- Public API -------------------------------------------------------
 
@@ -468,6 +480,11 @@ class ExecutionEngine:
         if not prompts:
             console.print("No prompts to execute")
             return ExecutionResult()
+
+        # Remember which markdown sources backed this run, so a quota wait can
+        # re-import blocks the queue file lost mid-run. See run_with_auto_resume
+        # and _reimport_markdown_sources for why that recovery is needed.
+        self._markdown_sources = sorted({p.origin_file for p in prompts if p.origin_file})
 
         total = len(prompts)
         results: list[Response] = []
@@ -818,12 +835,6 @@ class ExecutionEngine:
             last_result = await self.execute_queue()
 
             remaining = self.queue_manager.load_queue()
-            if not remaining:
-                # No notification here -- execute_queue already sent "batch
-                # complete" the instant it detected a clean, full drain, which
-                # is true on every path that reaches this line. This check is
-                # just how the loop notices it's done and can stop.
-                return last_result
             if last_result.stopped_reason != "quota":
                 # Non-quota failure -- don't auto-retry, the user needs to look
                 # at it. No notification here either: execute_queue already
@@ -832,6 +843,22 @@ class ExecutionEngine:
                 # detection. That is what makes it reach the phone under
                 # `--once` too, a mode that never calls this function at all.
                 return last_result
+            if not remaining:
+                # A quota stop with an empty queue is not proof the queue is
+                # done. `.sandglass/queue.json` lives inside the project tree,
+                # where queued blocks run with full tool access and are known to
+                # rewrite it mid-run (see queue_manager.remove_prompt_entry), so
+                # "empty" often means "the queue file was wiped". The
+                # un-completed block is still in its markdown source — which is
+                # only cut after a *completed* response — so re-import recovers
+                # exactly the remainder still worth waiting to run. If nothing
+                # comes back (e.g. a `queue add`-only queue, or the block was
+                # cut by someone else while we watched), there is nothing to
+                # wait for and the loop ends.
+                self._reimport_markdown_sources()
+                remaining = self.queue_manager.load_queue()
+                if not remaining:
+                    return last_result
 
             made_progress = last_result.completed > 0 or remaining[0].id != prompts_before[0].id
             stalls = 0 if made_progress else stalls + 1
@@ -883,10 +910,49 @@ class ExecutionEngine:
                 revived = self.account_pool.advance() or self.account_pool.current
                 if revived is not None:
                     self.claude_client.auth_token = revived.token
+            # A quota wait runs for hours, and the "out of credit" push went to
+            # a phone at the start of it -- so this is the one moment where a
+            # topped-up balance is actually likely. Asking costs one instant
+            # refusal per vendor and bills nothing; not asking spends the rest
+            # of the night's Claude quota on blocks that were meant to be cheap.
+            if self.provider_registry is not None:
+                for name in self.provider_registry.restore_credit():
+                    console.print(
+                        f"  [dim]Giving '{name}' another try — it may have been "
+                        "topped up during the wait.[/dim]"
+                    )
             notify.send(
                 f"Quota refreshed -- resuming with {len(remaining)} prompt(s) still queued.",
                 title="Sandglass: resuming",
             )
+
+    def _reimport_markdown_sources(self) -> None:
+        """Re-import markdown queue sources the queue file may have lost.
+
+        ``.sandglass/queue.json`` lives in the project directory, which is
+        exactly where queued blocks run with ``bypassPermissions`` and are known
+        to rewrite the file mid-run — see ``queue_manager.remove_prompt_entry``
+        for the live incident that documented it. A quota stop combined with an
+        empty queue can therefore mean "the queue file was wiped", not "the
+        queue is done": cutting a block out of its markdown source is a separate
+        step that only ever happens after a *completed* response, so the
+        un-completed remainder is still sitting in the source file. Re-importing
+        it recovers precisely that remainder.
+
+        Only the sources actually backing this run are touched, and the
+        ``skip_executed`` pass in the next ``execute_queue`` re-drops any block
+        some other runner already finished while the queue file was gone.
+        """
+        for source in self._markdown_sources:
+            added = self.queue_manager.import_from_markdown(
+                source, use_tiers=self.tiers
+            )
+            if added:
+                logger.info(
+                    "Re-imported %d prompt(s) from %s after the queue file "
+                    "read empty following a quota stop",
+                    added, source,
+                )
 
     async def _ask_why_nothing_changed(
         self, prompt: PromptObject, response: Response
@@ -1076,20 +1142,33 @@ class ExecutionEngine:
                 )
             return None
 
-        key = self.provider_registry.key_for(name) if self.provider_registry else None
+        # Keyed on `provider.name`, not the block's spelling: `providers.get`
+        # is case-insensitive, so `provider: DeepSeek` resolves fine here and
+        # would then miss a registry that is keyed on the canonical name.
+        registry = self.provider_registry
+        key = registry.key_for(provider.name) if registry else None
         if not key:
+            # Two different reasons to be here, and telling them apart is the
+            # difference between "add a config line" and "top the account up".
+            spent = bool(registry and registry.is_out_of_credit(provider.name))
             if name not in self._provider_warned:
                 self._provider_warned.add(name)
-                console.print(
-                    f"  [yellow]This block asked for '{name}', but no API key is "
-                    f"configured for it — running it on Anthropic instead.[/yellow]"
-                )
-                console.print(
-                    f"  [dim]Add one with `sandglass providers set {name}`.[/dim]"
-                )
+                if spent:
+                    console.print(
+                        f"  [yellow]'{provider.name}' has no credit left — running "
+                        "this block, and the rest marked for it, on Claude.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        f"  [yellow]This block asked for '{name}', but no API key is "
+                        f"configured for it — running it on Anthropic instead.[/yellow]"
+                    )
+                    console.print(
+                        f"  [dim]Add one with `sandglass providers set {name}`.[/dim]"
+                    )
             logger.warning(
-                "Prompt %s requested provider %s with no key configured; "
-                "falling back to Anthropic", prompt.id, name,
+                "Prompt %s requested provider %s (%s); falling back to Anthropic",
+                prompt.id, name, "out of credit" if spent else "no key configured",
             )
             return None
         return provider, key
@@ -1186,6 +1265,86 @@ class ExecutionEngine:
                     f"Quota spent on '{spent}'. Continuing on '{nxt.name}'.",
                     title="Sandglass: switched account",
                 )
+            except ProviderCreditExhaustedError as exc:
+                # Money, not time. Nothing about this refusal gets better by
+                # waiting, so the block moves: to the vendor's next key, then
+                # off the vendor entirely. Only when Claude has nothing left
+                # either does it become a wait -- see below.
+                # Lowercased: the registry is keyed on the canonical vendor
+                # name, which a block spelling it `provider: DeepSeek` is not.
+                name = (
+                    exc.provider_name or prompt.provider or ""
+                ).strip().lower() or "the provider"
+                nxt_key = (
+                    self.provider_registry.mark_out_of_credit(name)
+                    if self.provider_registry else None
+                )
+                if nxt_key is not None:
+                    console.print(
+                        f"  [yellow]↻ That '{name}' key is out of credit — "
+                        "switching to the next one and retrying this block.[/yellow]"
+                    )
+                    logger.info(
+                        "Rotated %s key on prompt %s after: %s", name, prompt.id, exc
+                    )
+                    continue
+
+                console.print(f"  [yellow]✖ '{name}' is out of credit: {exc}[/yellow]")
+                logger.warning(
+                    "Provider %s is out of credit on prompt %s: %s", name, prompt.id, exc
+                )
+                notify.send(
+                    f"{name} is out of credit. Blocks marked for it are running on "
+                    "Claude quota until it is funded again, or until another key is "
+                    f"added with `sandglass providers set {name} --add`.",
+                    title="Sandglass: provider out of credit",
+                    priority="high",
+                )
+                if self._switch_to_available_account():
+                    console.print(
+                        "  [yellow]↻ Running this block on Claude instead.[/yellow]"
+                    )
+                    continue
+
+                # Nowhere left to send it: every Claude account is spent too.
+                # Reported as a quota hit precisely so the queue takes the path
+                # that already exists for that -- stop, record `waiting`, and
+                # sit out the hourglass until the first account refreshes.
+                pool_reset = self.account_pool.earliest_reset() if self.account_pool else None
+                console.print(
+                    "  [yellow]…and every Claude account is out of quota too — "
+                    "waiting for the first one to refresh.[/yellow]"
+                )
+                raise QuotaExceededError(
+                    f"{name} is out of credit and every Claude account is out of "
+                    f"quota ({exc})",
+                    rate_limit_info={"resetsAt": pool_reset} if pool_reset else None,
+                    session_id=exc.session_id,
+                ) from exc
+
+    def _switch_to_available_account(self) -> bool:
+        """Point the Claude client at an account with quota left.
+
+        True with no pool configured as well: single-account mode has exactly
+        one credential and no way to know it is spent short of trying it, which
+        is what it did before rotation existed and still the right answer.
+        """
+        pool = self.account_pool
+        if pool is None:
+            return True
+        # An account parked earlier in the run may well have refreshed while
+        # the external blocks were running.
+        pool.clear_expired()
+        current = pool.current
+        if current is not None and current.is_available():
+            return True
+        nxt = pool.advance()
+        if nxt is None:
+            return False
+        self.claude_client.auth_token = nxt.token
+        console.print(f"  [yellow]↻ Switching to Claude account '{nxt.name}'.[/yellow]")
+        logger.info("Rotated to account %s to absorb a provider fallback", nxt.name)
+        return True
 
     async def execute_prompt(self, prompt: PromptObject) -> Response:
         """Send a single prompt to Claude Code with a live progress spinner."""

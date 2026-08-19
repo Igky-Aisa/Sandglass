@@ -372,6 +372,20 @@ blocks are the ones worth spending pennies on.
   table because that is the only table it has. The run summary says which
   blocks those were, and they are never charged to a Claude account's totals.
 
+**Out of credit is not out of quota.** A prepaid balance hitting zero
+(`API Error: 402 Insufficient Balance`) doesn't come back on a clock, so
+waiting for it is waiting for nothing. The run moves instead: to that vendor's
+next key, then off the vendor entirely — every later block marked for it goes
+to Claude without re-probing — and it only becomes a wait when Claude has no
+quota left either, which is the one case where waiting is the right answer.
+A push notification fires at the moment of the refusal, and a run that does end
+up sitting out a quota wait gives the vendor one more chance afterwards, since
+a top-up during those hours is exactly what the notification asks for. Store a
+second key with `sandglass providers set deepseek --add` (without `--add` the
+new key replaces the stored one); `providers list` shows how many are held.
+Credit state is per-run and never written to disk — an empty balance is undone
+by paying, not by time, so persisting it would bench a funded key for nothing.
+
 No key configured, or `--no-external`? The block runs on Claude, with a warning
 — the fallback direction is always *toward* Anthropic, never silently outward.
 Its `deepseek-…` model name is swapped for the run default at the same time,

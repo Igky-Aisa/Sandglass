@@ -37,7 +37,7 @@ import json
 import logging
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -150,9 +150,38 @@ PROVIDERS: dict[str, Provider] = {DEEPSEEK.name: DEEPSEEK}
 
 @dataclass
 class ProviderRegistry:
-    """Which external providers this machine has a usable key for."""
+    """Which external providers this machine has a usable key for.
 
-    keys: dict[str, str]
+    A provider may hold **more than one key**, in file order, and the registry
+    tracks which of them is in use. That exists for one reason: an external key
+    is metered, so it doesn't hit a quota that refreshes on a clock — it hits a
+    balance of zero, which no amount of waiting fixes. When that happens the run
+    moves to the next key for that vendor, and only when every one of them is
+    spent does it fall back to Anthropic (see
+    ``ExecutionEngine._execute_with_rotation``).
+
+    **Credit state is per-run and never persisted.** An empty balance is undone
+    by a human topping the account up, not by time passing, so writing it to
+    disk would bench a freshly-funded key on the next run for no reason. A new
+    `sandglass execute` always gives every key another chance.
+    """
+
+    # Written as either one key or several; normalised to a list below so the
+    # rest of the module only ever deals with one shape.
+    keys: dict[str, "str | list[str]"]
+    # Which key each provider is currently on, and the providers whose every
+    # key has come back "no credit" during this run.
+    _index: dict[str, int] = field(default_factory=dict)
+    _spent: set[str] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        normalised: dict[str, list[str]] = {}
+        for name, value in (self.keys or {}).items():
+            candidates = [value] if isinstance(value, str) else list(value or [])
+            usable = [str(k).strip() for k in candidates if k and str(k).strip()]
+            if usable:
+                normalised[name] = usable
+        self.keys = normalised
 
     @classmethod
     def default_path(cls) -> Path:
@@ -175,15 +204,20 @@ class ProviderRegistry:
 
             {"deepseek": {"api_key": "sk-..."}}
             {"providers": {"deepseek": {"api_key": "sk-..."}}}
+
+        and either singular or plural, because a vendor account that has run
+        out of credit is only recoverable mid-run if a second one was named::
+
+            {"deepseek": {"api_keys": ["sk-first", "sk-second"]}}
         """
-        keys: dict[str, str] = {}
+        keys: dict[str, list[str]] = {}
 
         # The environment is the weakest source, so it is read first and any
         # file entry overwrites it.
         for name, provider in PROVIDERS.items():
             from_env = os.environ.get(provider.key_env)
             if from_env and from_env.strip():
-                keys[name] = from_env.strip()
+                keys[name] = [from_env.strip()]
 
         path = path or cls.default_path()
         if path.exists():
@@ -201,23 +235,91 @@ class ProviderRegistry:
                         path, name, ", ".join(sorted(PROVIDERS)),
                     )
                     continue
-                key = entry.get("api_key") if isinstance(entry, dict) else entry
-                if not key or not isinstance(key, str):
-                    raise ProvidersError(
-                        f"{path}: provider {name!r} has no 'api_key'."
-                    )
-                keys[name] = key.strip()
+                keys[name] = _entry_keys(path, name, entry)
             _warn_if_world_readable(path)
 
         if keys:
-            logger.info("Provider keys available for: %s", ", ".join(sorted(keys)))
+            logger.info(
+                "Provider keys available for: %s",
+                ", ".join(
+                    f"{name} ({len(k)} keys)" if len(k) > 1 else name
+                    for name, k in sorted(keys.items())
+                ),
+            )
         return cls(keys=keys)
 
+    # --- Keys in use ------------------------------------------------------
+
     def key_for(self, name: str) -> Optional[str]:
-        return self.keys.get(name)
+        """The key a call to ``name`` should use right now, if any is left."""
+        pool = self.keys.get(name) or []
+        index = self._index.get(name, 0)
+        if name in self._spent or index >= len(pool):
+            return None
+        return pool[index]
 
     def has(self, name: str) -> bool:
-        return bool(self.keys.get(name))
+        return self.key_for(name) is not None
+
+    def key_count(self, name: str) -> int:
+        """How many keys are configured for ``name``, spent ones included."""
+        return len(self.keys.get(name) or [])
+
+    def is_out_of_credit(self, name: str) -> bool:
+        """True once every configured key for ``name`` has refused for money."""
+        return name in self._spent
+
+    def mark_out_of_credit(self, name: str) -> Optional[str]:
+        """Retire the key in use for ``name`` and hand back the next one.
+
+        ``None`` means there is no next one, i.e. the vendor is unusable for the
+        rest of this run and blocks marked for it belong on Anthropic.
+        """
+        pool = self.keys.get(name) or []
+        index = self._index.get(name, 0) + 1
+        self._index[name] = index
+        if index >= len(pool):
+            self._spent.add(name)
+            logger.warning(
+                "Every %s key (%d) is out of credit; blocks marked for it will "
+                "run on Anthropic instead.", name, len(pool),
+            )
+            return None
+        logger.info(
+            "Rotated %s to key %d of %d after an out-of-credit refusal",
+            name, index + 1, len(pool),
+        )
+        return pool[index]
+
+    def restore_credit(self) -> list[str]:
+        """Let every retired key back in, and say which vendors those were.
+
+        Called after the run has sat out a quota wait, which is measured in
+        hours and is exactly when a human who saw the "out of credit"
+        notification may have topped the account up. The cost of being wrong is
+        one refused request per vendor, which returns instantly and bills
+        nothing; the cost of not asking is a whole night of cheap blocks
+        spending Claude quota.
+        """
+        revived = sorted(self._spent)
+        self._index.clear()
+        self._spent.clear()
+        return revived
+
+
+def _entry_keys(path: Path, name: str, entry: object) -> list[str]:
+    """The keys one providers-file entry declares, in the order written."""
+    if isinstance(entry, dict):
+        raw = entry.get("api_keys", entry.get("api_key"))
+    else:
+        raw = entry
+    candidates = [raw] if isinstance(raw, str) else list(raw or []) if isinstance(raw, list) else []
+    keys = [k.strip() for k in candidates if isinstance(k, str) and k.strip()]
+    if not keys:
+        raise ProvidersError(
+            f"{path}: provider {name!r} has no 'api_key' (or 'api_keys')."
+        )
+    return keys
 
 
 def get(name: Optional[str]) -> Optional[Provider]:

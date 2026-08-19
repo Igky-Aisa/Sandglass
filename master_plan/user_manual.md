@@ -373,6 +373,36 @@ twice for anything you wouldn't paste into a stranger's website.
   accident: only a block that names DeepSeek ever leaves Anthropic. To force a
   whole run back onto Claude, use `sandglass execute --no-external`.
 
+**If the DeepSeek balance runs out mid-run, the queue keeps going.** DeepSeek
+is prepaid, so it doesn't slow you down when the money runs out — it refuses
+outright (`API Error: 402 Insufficient Balance`). Waiting for that to fix
+itself would waste the whole night, because nothing fixes it except you paying.
+So Sandglass moves the block instead, in this order:
+
+1. **To your next DeepSeek key**, if you gave it one (see below).
+2. **To Claude**, otherwise — the block runs on subscription quota, and every
+   later block marked for DeepSeek goes straight to Claude too, without wasting
+   a call to find out it's still empty.
+3. **Only if Claude has nothing left either** does the run wait: the hourglass
+   appears and it resumes when the first account's quota refreshes. After a
+   wait like that it gives DeepSeek one more try, in case you topped it up
+   while it slept.
+
+You get a phone notification the moment it happens (if you have notifications
+set up), so a top-up mid-run is enough to put the cheap blocks back on DeepSeek.
+
+**Adding a second DeepSeek key:**
+
+```
+sandglass providers set deepseek --add
+```
+
+Without `--add` the key you type **replaces** the stored one; with it, the new
+key is kept after the existing ones and used only once the earlier one runs
+dry. `sandglass providers list` shows how many are stored. Two keys on two
+separate DeepSeek accounts is the difference between a run that keeps going on
+DeepSeek and one that spends the rest of the night on Claude quota.
+
 ---
 
 ## 5. Using future_prompts.md as your default queue
