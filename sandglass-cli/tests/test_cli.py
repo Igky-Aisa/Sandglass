@@ -182,3 +182,23 @@ def test_claude_md_update_then_new_claude_project_uses_updated_content(tmp_path,
     assert scaffold_result.exit_code == 0
     with open("CLAUDE.md", "r", encoding="utf-8") as fh:
         assert fh.read() == "brand new project rules"
+
+
+def test_scaffold_writes_both_agent_files_identically(tmp_path):
+    """A project must not ship rules to only half the agents that read it.
+
+    Claude Code reads CLAUDE.md and everything on the AGENTS.md convention reads
+    AGENTS.md; neither reads the other's. Both come from one bundled template,
+    so they start identical -- `queue lint` is what keeps them that way after.
+    """
+    from sandglass.project_scaffold import new_claude_project
+
+    target = tmp_path / "proj"
+    new_claude_project(str(target))
+
+    claude_md, agents_md = target / "CLAUDE.md", target / "AGENTS.md"
+    assert claude_md.exists() and agents_md.exists()
+    assert claude_md.read_bytes() == agents_md.read_bytes()
+    # The cold-start window ships too, or a non-Claude block has nothing cheap
+    # to read when it starts with no session.
+    assert (target / "prompt_tools" / "context.md").exists()

@@ -312,3 +312,161 @@ def test_a_malformed_accounts_file_fails_loudly(tmp_path, payload, expected):
         AccountPool.load(path)
 
     assert expected in str(exc.value).lower()
+
+
+# --- Disabling an account -----------------------------------------------------
+#
+# Disabled and exhausted look the same to `advance()` on purpose, but they are
+# not the same fact: exhaustion expires on a clock and disabled does not. These
+# check that the difference survives everywhere it matters — the file, the
+# loader, the wait calculation, and the guard that stops the pool being emptied.
+
+
+def _write_raw(tmp_path, entries) -> "object":
+    path = tmp_path / "accounts.json"
+    path.write_text(json.dumps({"accounts": entries}), encoding="utf-8")
+    return path
+
+
+def test_disabled_account_is_never_available():
+    account = Account(name="parked", token="tok", enabled=False)
+    assert account.is_available() is False
+    # Even with quota demonstrably free: `exhausted_until` is None here.
+    assert account.exhausted_until is None
+    assert "disabled" in repr(account)
+    assert "tok" not in repr(account)
+
+
+def test_loader_accepts_either_spelling(tmp_path):
+    path = _write_raw(
+        tmp_path,
+        [
+            {"name": "a", "token": "tok-a"},
+            {"name": "b", "token": "tok-b", "enabled": False},
+            {"name": "c", "token": "tok-c", "disabled": True},
+        ],
+    )
+    pool = AccountPool.load(path)
+    assert [a.enabled for a in pool.accounts] == [True, False, False]
+
+
+def test_pool_starts_on_the_first_enabled_account(tmp_path):
+    path = _write_raw(
+        tmp_path,
+        [
+            {"name": "a", "token": "tok-a", "enabled": False},
+            {"name": "b", "token": "tok-b"},
+        ],
+    )
+    pool = AccountPool.load(path)
+    # Not just the index: `history` is what the run report prints, and starting
+    # on a disabled account would claim the run had used it.
+    assert pool.current_name == "b"
+    assert pool.history == ["b"]
+
+
+def test_all_disabled_is_a_load_error_not_a_silent_stall(tmp_path):
+    path = _write_raw(
+        tmp_path,
+        [
+            {"name": "a", "token": "tok-a", "enabled": False},
+            {"name": "b", "token": "tok-b", "enabled": False},
+        ],
+    )
+    with pytest.raises(AccountsError) as exc:
+        AccountPool.load(path)
+    assert "every account is disabled" in str(exc.value)
+
+
+def test_advance_skips_disabled_accounts(tmp_path):
+    path = _write_raw(
+        tmp_path,
+        [
+            {"name": "a", "token": "tok-a"},
+            {"name": "b", "token": "tok-b", "enabled": False},
+            {"name": "c", "token": "tok-c"},
+        ],
+    )
+    pool = AccountPool.load(path)
+    assert pool.current_name == "a"
+    assert pool.advance().name == "c"
+
+
+def test_earliest_reset_ignores_disabled_accounts(tmp_path):
+    path = _write_raw(
+        tmp_path,
+        [
+            {"name": "a", "token": "tok-a"},
+            {"name": "b", "token": "tok-b", "enabled": False},
+        ],
+    )
+    pool = AccountPool.load(path)
+    soon, later = time.time() + 60, time.time() + 6000
+    # The disabled one comes back first, but the pool still won't use it, so
+    # waking up at `soon` would wake the engine to nothing it can run.
+    pool.accounts[1].exhausted_until = soon
+    pool.accounts[0].exhausted_until = later
+    assert pool.earliest_reset() == later
+
+
+def test_set_enabled_round_trips_and_keeps_every_other_key(tmp_path):
+    from sandglass.accounts import set_enabled
+
+    path = _write_raw(
+        tmp_path,
+        [
+            {"name": "a", "token": "tok-a", "note": "keep me"},
+            {"name": "b", "token": "tok-b"},
+        ],
+    )
+    assert set_enabled("a", False, path) is True
+    saved = json.loads(path.read_text(encoding="utf-8"))["accounts"]
+    assert saved[0]["enabled"] is False
+    # A rewrite of a credential file must carry through what it doesn't know.
+    assert saved[0]["token"] == "tok-a"
+    assert saved[0]["note"] == "keep me"
+    assert saved[1] == {"name": "b", "token": "tok-b"}
+
+    # Idempotent: saying it twice is not an error, it is just already true.
+    assert set_enabled("a", False, path) is False
+    assert set_enabled("a", True, path) is True
+    assert json.loads(path.read_text(encoding="utf-8"))["accounts"][0]["enabled"] is True
+
+
+def test_set_enabled_clears_the_legacy_disabled_key(tmp_path):
+    from sandglass.accounts import set_enabled
+
+    path = _write_raw(tmp_path, [
+        {"name": "a", "token": "tok-a", "disabled": True},
+        {"name": "b", "token": "tok-b"},
+    ])
+    set_enabled("a", True, path)
+    entry = json.loads(path.read_text(encoding="utf-8"))["accounts"][0]
+    assert entry["enabled"] is True
+    # Two keys disagreeing about the same fact is the bug this prevents.
+    assert "disabled" not in entry
+
+
+def test_cannot_disable_the_last_enabled_account(tmp_path):
+    from sandglass.accounts import set_enabled
+
+    path = _write_raw(tmp_path, [
+        {"name": "a", "token": "tok-a"},
+        {"name": "b", "token": "tok-b", "enabled": False},
+    ])
+    with pytest.raises(AccountsError) as exc:
+        set_enabled("a", False, path)
+    assert "only enabled account" in str(exc.value)
+    # And the file is untouched, not half-written.
+    assert json.loads(path.read_text(encoding="utf-8"))["accounts"][0] == {
+        "name": "a", "token": "tok-a",
+    }
+
+
+def test_set_enabled_rejects_an_unknown_name(tmp_path):
+    from sandglass.accounts import set_enabled
+
+    path = _write_raw(tmp_path, [{"name": "a", "token": "tok-a"}])
+    with pytest.raises(AccountsError) as exc:
+        set_enabled("typo", False, path)
+    assert "typo" in str(exc.value) and "Known: a" in str(exc.value)

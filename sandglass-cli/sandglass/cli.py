@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import signal
 from datetime import datetime
 from typing import Optional
 
@@ -709,6 +710,7 @@ def execute(
         allow_external=external,
         tiers=tiers,
     )
+    _accept_break_as_interrupt()
     try:
         if once:
             asyncio.run(engine.execute_queue())
@@ -723,6 +725,36 @@ def execute(
         # later and most worth having written down.
         engine.record_stop(run_report.REASON_CRASHED, f"{type(exc).__name__}: {exc}")
         raise
+
+
+def _accept_break_as_interrupt() -> None:
+    """Make a Windows CTRL_BREAK behave exactly like Ctrl-C.
+
+    The control panel's Stop button interrupts a run by sending CTRL_BREAK_EVENT
+    to its process group -- on Windows that is the only console signal one
+    process can send another without also hitting itself, which is why the child
+    is started in a group of its own.
+
+    Python's *default* action for SIGBREAK, though, is to terminate outright.
+    That would skip the `KeyboardInterrupt` handler in `execute` and with it the
+    stop-reason bookkeeping and the "unexecuted prompts remain in the queue"
+    guarantee -- so a stopped run would look, to the next one, like a crash.
+    Mapping it to `KeyboardInterrupt` is what makes the button honest.
+
+    No-op everywhere else: POSIX has no SIGBREAK and gets a real SIGINT.
+    """
+    if os.name != "nt" or not hasattr(signal, "SIGBREAK"):
+        return
+
+    def _raise(_signum, _frame):
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGBREAK, _raise)
+    except (ValueError, OSError) as exc:
+        # Not the main thread, or no console attached. Worth saying, never
+        # worth refusing to run over.
+        logger.debug("Could not install a SIGBREAK handler: %s", exc)
 
 
 def _load_account_pool(mode: str) -> "AccountPool | None":
@@ -761,6 +793,17 @@ def _load_account_pool(mode: str) -> "AccountPool | None":
             )
             raise typer.Exit(code=1)
         return None
+
+    # A run quietly using two of three accounts looks identical to one that had
+    # two all along -- right up until it waits for quota hours earlier than
+    # expected and nothing on screen explains why.
+    off = [a.name for a in pool.accounts if not a.enabled]
+    if off:
+        console.print(
+            f"[dim]{len(off)} account(s) disabled and will be skipped: "
+            f"{', '.join(off)} — re-enable with "
+            f"[cyan]sandglass accounts --enable <name>[/cyan].[/dim]"
+        )
     return pool
 
 
@@ -877,6 +920,23 @@ def setup_token_cmd() -> None:
 
 @app.command()
 def accounts(
+    enable: Optional[str] = typer.Option(
+        None,
+        "--enable",
+        metavar="NAME",
+        help="Put an account back into the rotation, then show the pool.",
+    ),
+    disable: Optional[str] = typer.Option(
+        None,
+        "--disable",
+        metavar="NAME",
+        help=(
+            "Take an account out of the rotation until you say otherwise. For "
+            "an account whose weekly quota is gone: the pool then skips it "
+            "outright instead of spending a block rediscovering it is spent. "
+            "Refuses to disable the last enabled account."
+        ),
+    ),
     probe: bool = typer.Option(
         False,
         "--probe",
@@ -892,7 +952,29 @@ def accounts(
 
     Free by default, which also means it cannot confirm a token actually
     works — pass --probe for that.
+
+    --enable/--disable edit the accounts file and then print the pool, so the
+    command that made the change is also the one that shows the result.
     """
+    if enable and disable:
+        console.print("[red]Error: pass --enable or --disable, not both.[/red]")
+        raise typer.Exit(code=1)
+
+    if enable or disable:
+        wanted = bool(enable)
+        target = enable or disable
+        try:
+            changed = accounts_mod.set_enabled(target, wanted)
+        except AccountsError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
+        state = "enabled" if wanted else "disabled"
+        if changed:
+            console.print(f"[green]✔[/green] {target} is now [bold]{state}[/bold].")
+        else:
+            console.print(f"[dim]{target} was already {state}; nothing to do.[/dim]")
+        console.print()
+
     try:
         pool = AccountPool.load()
     except AccountsError as exc:
@@ -923,7 +1005,10 @@ def accounts(
     _verify_account_pool(pool)
 
     for account in pool.accounts:
-        if account.is_available():
+        if not account.enabled:
+            # Not rendered as a problem: it is a state somebody chose.
+            state = "[dim]○ disabled — skipped by every run[/dim]"
+        elif account.is_available():
             state = "[green]●[/green] quota available"
         else:
             # Local wall-clock, not an ISO string: this line answers "how long
@@ -939,11 +1024,21 @@ def accounts(
             "from an expired one. Run [cyan]sandglass accounts --probe[/cyan] to "
             "check them for real (costs a few tokens per account).[/dim]"
         )
+        console.print(
+            "[dim]Park an account you don't want used for a while with "
+            "[cyan]sandglass accounts --disable <name>[/cyan]; bring it back "
+            "with [cyan]--enable <name>[/cyan].[/dim]"
+        )
         return
 
     console.print("\n[bold]Probing each token with one small request…[/bold]")
     failures = 0
     for account in pool.accounts:
+        if not account.enabled:
+            # A probe costs real tokens on the account being probed. Spending
+            # them on one the pool was told to skip is pure waste.
+            console.print(f"  [dim]–[/dim] {account.name}: disabled, not probed")
+            continue
         ok, detail = _probe_account(client, account)
         if ok:
             console.print(f"  [green]✔[/green] {account.name}: works")
@@ -1151,8 +1246,42 @@ def dashboard(
     title = os.path.basename(os.path.abspath(os.getcwd())) or "Sandglass"
     path = dashboard_mod.write(source, title)
     console.print(f"[green]Dashboard written to {path}[/green]")
+    console.print(
+        "[dim]That page is a display — a file:// page can't start anything. For "
+        "Run/Stop buttons, use [cyan]sandglass ui[/cyan].[/dim]"
+    )
     if not no_open:
         dashboard_mod.open_in_browser(path)
+
+
+@app.command()
+def ui(
+    source: str = typer.Option(
+        DEFAULT_QUEUE_SOURCE, "--source", help="Markdown queue source to report on."
+    ),
+    port: int = typer.Option(
+        0, "--port", help="Port to listen on. 0 (default) lets the OS pick a free one."
+    ),
+    no_open: bool = typer.Option(
+        False, "--no-open", help="Print the URL but don't launch a browser."
+    ),
+) -> None:
+    """Serve the dashboard with working buttons: run, stop, park an account.
+
+    The same page `sandglass dashboard` writes, plus controls -- because a page
+    opened from a file cannot start a process, so buttons there would be
+    decoration. Run is not a re-implementation of anything: it spawns
+    `sandglass execute` exactly as you would have typed it, and streams the
+    output into the page. Stop sends the same interrupt Ctrl-C does, so the
+    queue is left intact.
+
+    Runs in the foreground on 127.0.0.1 with a key in the URL, and takes any run
+    it started with it when you Ctrl-C. Nothing is left listening afterwards.
+    """
+    from . import webui
+
+    title = os.path.basename(os.path.abspath(os.getcwd())) or "Sandglass"
+    webui.serve(source, title, port=port, open_browser=not no_open)
 
 
 @app.command()
@@ -1309,6 +1438,8 @@ def queue_lint() -> None:
     dependency is missing still burns a full prompt's worth of quota and
     produces nothing, so it is worth a second of grep first.
     """
+    _lint_agent_mirror()
+
     qm = QueueManager()
     prompts = qm.get_all_prompts()
     source_file = None
@@ -1360,6 +1491,55 @@ def queue_lint() -> None:
         console.print(f"[green]✓ {len(prompts)} block(s), no issues found.[/green]")
     if source_file:
         console.print(f"[dim]Linted from {source_file}; queue left untouched.[/dim]")
+
+
+def _lint_agent_mirror() -> None:
+    """Warn when `CLAUDE.md` and `AGENTS.md` have drifted apart.
+
+    They are meant to be one document under two names, because Claude Code reads
+    only the first and everything on the AGENTS.md convention reads only the
+    second. A rule that reached one of them is a rule half the agents working in
+    this repo have never seen -- and a drifted pair looks completely normal until
+    a block ignores a convention nobody ever told it about.
+
+    Checked here rather than in a git hook because this is the command people
+    already run before an unattended batch, which is exactly when a non-Claude
+    block is about to read whichever file is behind.
+    """
+    claude_md, agents_md = "CLAUDE.md", "AGENTS.md"
+    if not os.path.exists(claude_md):
+        return
+
+    if not os.path.exists(agents_md):
+        console.print(
+            f"[yellow]![/yellow] {agents_md} is missing — agents that read it "
+            "(OpenCode/Grok, Codex) start with no project rules at all."
+        )
+        console.print(f"      [dim]Fix: copy {claude_md} to {agents_md}.[/dim]")
+        return
+
+    def _body(path: str) -> str:
+        # Compared with line endings normalised: git may check one out CRLF and
+        # the other LF depending on when each was written, and that difference
+        # is not drift anybody needs to be told about.
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().replace('\r\n', '\n')
+
+    try:
+        drifted = _body(claude_md) != _body(agents_md)
+    except OSError as exc:
+        logger.warning("Could not compare %s and %s: %s", claude_md, agents_md, exc)
+        return
+
+    if drifted:
+        console.print(
+            f"[yellow]![/yellow] {claude_md} and {agents_md} have drifted apart; "
+            "they are meant to be identical."
+        )
+        console.print(
+            "      [dim]Diff them, then copy whichever is current over the "
+            "other.[/dim]"
+        )
 
 
 # Backtick-quoted tokens that look like repo-relative paths: a slash or a dot

@@ -1,3 +1,31 @@
+# ⚠️ MIRROR FILE — `CLAUDE.md` and `AGENTS.md` are one document in two places
+
+This file has a twin. **`CLAUDE.md` is what Claude Code reads; `AGENTS.md` is
+what every other agent reads** (OpenCode/Grok, Codex, and anything else on the
+AGENTS.md convention). Claude Code does *not* read `AGENTS.md`, and those tools
+do *not* read `CLAUDE.md` — so a rule living in only one of them is a rule half
+the agents working on this repo have never seen.
+
+**They are byte-identical on purpose** — not "similar", not "roughly in sync":
+identical, so drift is one command away from being visible.
+
+```bash
+diff CLAUDE.md AGENTS.md    # must print nothing
+```
+
+**The rule: any edit to one is copied to the other in the same task, before you
+report that task done.** Neither is the "real" one. After editing either, run
+the `diff` above and make it silent — `cp CLAUDE.md AGENTS.md` (or the reverse)
+is the entire fix. `sandglass queue lint` also checks this and warns before an
+unattended run starts.
+
+Why a copy and not a symlink or an `@import`: this repo is developed on Windows,
+where git checks symlinks out as plain text unless every clone sets
+`core.symlinks` — a silently gutted `CLAUDE.md` is a worse failure than drift,
+because nothing announces it. A copy always works for both readers.
+
+---
+
 # Project Context
 
 > Full rules and protocol: see [master_plan/rules_for_every_promt.md](master_plan/rules_for_every_promt.md)
@@ -35,6 +63,29 @@ nothing — the part that matters is the last session or two.
 - Run **`sandglass rotate-logs`** when the work log passes ~10 entries. It moves
   the older ones to `master_plan/archive/` and leaves a pointer, so history
   stays available without being re-read on every task.
+
+### `prompt_tools/context.md` — the cold-start window
+
+Not every agent that works here arrives warm. A block routed to a non-Claude
+model runs in a different CLI and **cannot join the queue's shared session**, so
+it starts cold: no memory of the previous block, none of the project knowledge
+the warm session had accumulated.
+
+`prompt_tools/context.md` exists for that reader. It is a **moving window**, not
+a log — a compact digest of where the project stands right now, capped at the
+last **5** task entries. Adding a sixth means deleting the oldest.
+
+- **Read it first when you start cold**, before anything else. It is built to be
+  the cheapest useful read in the repo — cheaper than `work_log.md`'s tail — and
+  it names what to open next when it isn't enough.
+- **Update it at the end of every task**, alongside the `work_log.md` entry: one
+  entry, **4 lines or fewer**, newest at the top, oldest deleted if that makes
+  six. It is a rewrite, never an append.
+- **Hard cap 120 lines.** Past that it has stopped doing its job.
+- It is a **derivative** file — everything in it is recoverable from
+  `work_log.md`. Never record something there that exists nowhere else.
+
+
 
 ## Non-negotiables
 

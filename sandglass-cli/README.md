@@ -143,6 +143,7 @@ for any single command.
 | `sandglass execute --no-skip-executed` | Send blocks even when they were already executed and cut by someone else |
 | `sandglass why` | Why the last run stopped — or what it's doing right now (see below) |
 | `sandglass dashboard [--source FILE] [--no-open]` | Write a visual status page (progress, phases, run state) to `.sandglass/dashboard.html` and open it (see below) |
+| `sandglass ui [--port N] [--no-open]` | Serve that page with working buttons — run, stop, park an account (see below) |
 | `sandglass rotate-logs [--keep N]` | Archive old `work_log.md` / `prompt_history.md` entries into `master_plan/archive/` |
 | `sandglass update [--check]` | Update Sandglass itself from the git repo (see Updating below) |
 
@@ -181,6 +182,60 @@ a run keeps catching up on its own.
 The phase breakdown only appears once at least one block in the project sets
 `phase:` (see [How to write a block](#per-prompt-model-and-effort) below) —
 projects with no notion of phases just get the overall ring.
+
+#### `sandglass ui` — the same page, with buttons that work
+
+The dashboard is a *display*. A page opened from `file://` cannot start a
+process, so a play button there would be decoration. `sandglass ui` serves the
+same page from a small local server, which gives it something to talk to:
+
+```bash
+sandglass ui                 # prints a URL and opens it
+sandglass ui --no-open       # print the URL only
+sandglass ui --port 8800     # fixed port; default 0 = let the OS pick a free one
+```
+
+- **▶ Run queue** spawns `sandglass execute` — the same command you would have
+  typed, as a child process — and streams its output into the page live. It is a
+  remote control, not a second implementation, so it cannot drift from the CLI.
+- **■ Stop** sends the same interrupt Ctrl-C does, so the run shuts down cleanly
+  and the queue is left exactly as it was. If it hasn't stopped in 10 seconds it
+  is killed.
+- **Park / Enable** on each account row is `sandglass accounts --disable/--enable`
+  without the typing.
+
+A **Queue** card carries the free, non-streaming commands: **Show queue**
+(`queue list`), **Check for problems** (`queue lint`), **Dry run**
+(`execute --dry-run`), **Why did it stop?** (`why`), and **Clear queue**
+(`queue clear`). None of them sends a prompt to a model. Clear arms on the first
+click and fires on the second, and is refused outright while a run is going —
+emptying the queue under a running executor is never what anyone means by it.
+
+Those buttons post a *name* from a fixed table; a request never contributes to
+the argv. That is the whole security model of the endpoint, and it is why
+`setup-token`, `providers set` (both handle a credential), `accounts --probe`
+(bills real tokens) and `update` (rewrites the running tool) are not on it.
+
+Both `dashboard` and `ui` show an **External providers** card under Accounts —
+one row per configured vendor with its key count, or the exact command to
+configure one. It is a separate card on purpose: a Claude account is flat-rate
+with a quota that refreshes on a clock and the pool rotates to it by itself,
+while a provider is metered and is never reached unless a block asks for it by
+name. "deepseek ●" means available on request, not in use. Out-of-credit shows
+only on a page the run itself regenerated, since that state is per-run and never
+persisted.
+
+It runs in the **foreground** and takes any run it started with it when you
+Ctrl-C — it is the thing you are watching, not a daemon left running alongside
+your work. Nothing is listening once you close it.
+
+> **On security.** `localhost` is not a private address: any page in any other
+> tab can POST to `http://127.0.0.1:<port>`, and the same-origin policy stops it
+> *reading* the reply, not sending the request. So every request must carry a
+> key minted per process and handed out only in the URL printed to your
+> terminal, requests from another origin are refused even with it, and the
+> socket binds `127.0.0.1` — never `0.0.0.0`. Treat the URL as a password: the
+> buttons run commands on your machine.
 
 ### History & responses
 
@@ -630,6 +685,30 @@ it protects.
 truncated, whitespace-wrapped, or still the placeholder from these docs, and
 the same token pasted under two names (which makes the pool look bigger than
 it is). It does not claim a token is valid.
+
+#### Parking an account you don't want used
+
+A weekly limit is not a nightly one. Once an account is finished for the week,
+leaving it in the pool costs a block on every run: the rotation lands on it,
+spends a real request rediscovering that it is spent, and only then moves on.
+Take it out until you say otherwise:
+
+```bash
+sandglass accounts --disable work     # skipped by every run from now on
+sandglass accounts --enable work      # back in the rotation
+```
+
+Both print the pool afterwards, so the command that made the change is also the
+one that shows the result. A disabled account renders as `○ disabled`, is never
+probed by `--probe` (a probe costs real tokens on the account being probed), and
+is excluded from the "what comes back first" calculation — otherwise a run would
+wake itself up for an account it is not allowed to touch.
+
+The flag lives in `accounts.json` itself, not in `.sandglass/`, because
+exhaustion and disabled are different facts: exhaustion expires on a clock, and
+"skip this one until I say otherwise" must not. Sandglass refuses to disable the
+last enabled account — a pool with nothing left in it cannot run anything, and
+that failure would otherwise surface hours later as an unexplained wait.
 
 The cycle, with three accounts:
 

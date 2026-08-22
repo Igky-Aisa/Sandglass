@@ -157,3 +157,70 @@ def test_write_creates_file_under_sandglass_dir(tmp_path, storage):
     assert path.endswith(dashboard.DASHBOARD_FILENAME)
     with open(path, encoding="utf-8") as fh:
         assert "My Project" in fh.read()
+
+
+# --- External providers ------------------------------------------------------
+#
+# The panel exists because "what can run my blocks right now" was only half
+# answered while it listed Claude accounts alone. The risk it introduces is the
+# opposite reading -- that a configured provider means work is going there --
+# so the card has to be unambiguous about metered and opt-in, and it must never
+# render a key.
+
+
+def _registry(keys):
+    from sandglass.providers import ProviderRegistry
+
+    return ProviderRegistry(keys=keys)
+
+
+def test_providers_card_shows_a_configured_vendor_without_its_key():
+    secret = "sk-doNotRenderThisAnywhere0123456789"
+    card = dashboard._providers_card(_registry({"deepseek": [secret]}))
+    assert "deepseek" in card
+    assert "1 key" in card and "metered" in card
+    # The whole reason the card takes counts rather than keys.
+    assert secret not in card
+
+
+def test_providers_card_counts_several_keys():
+    card = dashboard._providers_card(
+        _registry({"deepseek": ["sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "sk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]})
+    )
+    # Operationally different from one key: a mid-run balance refusal is a
+    # switch rather than a fallback onto the Claude quota routing existed to save.
+    assert "2 keys" in card
+
+
+def test_providers_card_names_the_fix_when_no_key_is_configured():
+    card = dashboard._providers_card(_registry({}))
+    assert "no key" in card
+    assert "sandglass providers set deepseek" in card
+
+
+def test_providers_card_shows_out_of_credit_only_from_a_live_registry():
+    registry = _registry({"deepseek": ["sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]})
+    registry._spent.add("deepseek")
+    card = dashboard._providers_card(registry)
+    assert "out of credit" in card
+    # Says what happens next, because waiting is not what fixes this.
+    assert "fall back to Claude" in card
+
+
+def test_providers_card_says_nothing_routes_there_on_its_own():
+    card = dashboard._providers_card(_registry({"deepseek": ["sk-" + "c" * 32]}))
+    assert "opt-in per block" in card
+
+
+def test_a_broken_providers_file_costs_the_card_not_the_page(tmp_path, storage, monkeypatch):
+    from sandglass import providers as providers_mod
+
+    def _explode(path=None):
+        raise providers_mod.ProvidersError("providers.json is not valid JSON")
+
+    monkeypatch.setattr(providers_mod.ProviderRegistry, "load", staticmethod(_explode))
+    assert dashboard._providers_card(None) == ""
+    # And the page around it still renders.
+    page = dashboard.generate(_source(tmp_path), "Test", storage=storage)
+    assert "<html" in page

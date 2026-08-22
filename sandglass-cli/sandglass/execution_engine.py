@@ -1795,7 +1795,15 @@ class ExecutionEngine:
         # push below, a tab left open on the dashboard has no other way to
         # learn the run kept going, since its own refresh timer just re-reads
         # whatever this last wrote.
-        dashboard.write(prompt.origin_file, os.path.basename(project_dir), storage=self.storage)
+        # The live registry, so the page can show a vendor that has run out of
+        # credit. That state is per-run and never persisted, so a dashboard
+        # generated anywhere else cannot know it.
+        dashboard.write(
+            prompt.origin_file,
+            os.path.basename(project_dir),
+            storage=self.storage,
+            registry=self.provider_registry,
+        )
 
         milestone = (pct // 5) * 5
         if milestone <= 0:

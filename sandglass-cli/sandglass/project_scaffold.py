@@ -35,9 +35,9 @@ class ScaffoldResult:
 
 
 def new_claude_project(target_dir: str = ".") -> ScaffoldResult:
-    """Create CLAUDE.md, master_plan/, and prompt_tools/ under ``target_dir``.
+    """Create CLAUDE.md, AGENTS.md, master_plan/, and prompt_tools/ under ``target_dir``.
 
-    CLAUDE.md is copied with its template content. Under master_plan/ and
+    CLAUDE.md and AGENTS.md are both copied from the one bundled template. Under master_plan/ and
     prompt_tools/, a template that has content is copied and one that is
     empty contributes only its filename -- see the module docstring for why
     the split exists. Anything that already exists at the target path is left
@@ -50,7 +50,13 @@ def new_claude_project(target_dir: str = ".") -> ScaffoldResult:
     result = ScaffoldResult()
     os.makedirs(target_dir, exist_ok=True)
 
+    # One template, written out under both names. Claude Code reads CLAUDE.md
+    # and everything on the AGENTS.md convention reads AGENTS.md; neither reads
+    # the other's file, so a project scaffolded with only one of them gives half
+    # its agents no rules at all. They start identical and the rule inside them
+    # says to keep them that way -- `sandglass queue lint` checks it.
     _copy_file(TEMPLATE_CLAUDE_MD, os.path.join(target_dir, "CLAUDE.md"), result)
+    _copy_file(TEMPLATE_CLAUDE_MD, os.path.join(target_dir, "AGENTS.md"), result)
 
     for dirname in TEMPLATE_DIRS:
         src_dir = os.path.join(TEMPLATES_DIR, dirname)

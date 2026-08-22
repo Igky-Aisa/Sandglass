@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import functools
 import html
+import json
 import logging
 import os
 import webbrowser
@@ -117,12 +118,353 @@ def _phase_rows(phases: dict[str, tuple[int, int]]) -> str:
     )
 
 
-def generate(source_file: str, title: str, storage: StorageService | None = None) -> str:
+def _control_bar(live: bool) -> str:
+    """The Run/Stop buttons and the live log, or nothing on a static page.
+
+    Omitted entirely from a file written to disk. A `file://` page has nothing
+    to send a request to, so rendering buttons there would produce controls that
+    look enabled and silently do nothing -- worse than not offering them. They
+    appear only when `sandglass ui` is serving the page and there is a process
+    on the other end able to act on a click.
+    """
+    if not live:
+        return ""
+    return """
+    <section class="card">
+      <h2>Run</h2>
+      <div class="controls">
+        <button id="btn-run" class="btn btn-go">▶ Run queue</button>
+        <button id="btn-stop" class="btn btn-stop" disabled>■ Stop</button>
+        <span id="run-state" class="run-state">idle</span>
+      </div>
+      <div id="toast" class="toast"></div>
+      <pre id="log" class="log" hidden></pre>
+    </section>
+
+    <section class="card">
+      <h2>Queue</h2>
+      <div class="controls">
+        <button class="btn" data-cmd="queue-list">Show queue</button>
+        <button class="btn" data-cmd="queue-lint">Check for problems</button>
+        <button class="btn" data-cmd="dry-run">Dry run</button>
+        <button class="btn" data-cmd="why">Why did it stop?</button>
+        <button class="btn btn-stop" data-cmd="queue-clear" data-confirm="Clear it — blocks stay in your markdown">Clear queue</button>
+      </div>
+      <div class="hint">
+        Everything here is free — nothing above sends a prompt to a model.
+        Clearing empties Sandglass&rsquo;s copy of the queue; blocks that came
+        from a markdown file are still in that file and re-import on the next run.
+      </div>
+      <pre id="cmdout" class="log" hidden></pre>
+    </section>
+    """
+
+
+def _live_script(key: str) -> str:
+    """The client half of the control panel.
+
+    Two loops, deliberately at different rates and doing different things:
+
+    - **State**, every 1.2s -- cheap JSON. Whether a run is going, and any
+      output produced since the last poll, asked for by cursor so a long run
+      never re-sends its whole log.
+    - **Cards**, every 6s -- re-fetches this same page and swaps only `#cards`.
+      Everything on the page is already rendered server-side, so this keeps one
+      source of truth for how a card looks instead of a second one in JS. The
+      control bar and the log live outside `#cards` precisely so a refresh
+      cannot scroll the log or steal focus from a button mid-click.
+    """
+    return (
+        "<script>\n"
+        "(function () {\n"
+        f"  var KEY = {json.dumps(key)};\n"
+        "  var cursor = 0, running = false;\n"
+        "  var $ = function (id) { return document.getElementById(id); };\n"
+        "  function toast(msg, bad) {\n"
+        "    var el = $('toast');\n"
+        "    el.textContent = msg || '';\n"
+        "    el.style.color = bad ? '#ef4444' : '';\n"
+        "  }\n"
+        "  function post(path, body) {\n"
+        "    return fetch(path + '?k=' + encodeURIComponent(KEY), {\n"
+        "      method: 'POST',\n"
+        "      headers: { 'Content-Type': 'application/json' },\n"
+        "      body: JSON.stringify(body || {})\n"
+        "    }).then(function (r) { return r.json(); })\n"
+        "      .then(function (d) { toast(d.message, !d.ok); return d; })\n"
+        "      .catch(function (e) { toast('Lost contact with Sandglass: ' + e, true); });\n"
+        "  }\n"
+        "  function setRunning(on) {\n"
+        "    running = on;\n"
+        "    $('btn-run').disabled = on;\n"
+        "    $('btn-stop').disabled = !on;\n"
+        "    $('run-state').textContent = on ? 'running' : 'idle';\n"
+        "  }\n"
+        "  function pollState() {\n"
+        "    fetch('/api/state?k=' + encodeURIComponent(KEY) + '&since=' + cursor)\n"
+        "      .then(function (r) { return r.json(); })\n"
+        "      .then(function (d) {\n"
+        "        if (d.running !== running) { setRunning(d.running); }\n"
+        "        cursor = d.cursor;\n"
+        "        if (d.lines && d.lines.length) {\n"
+        "          var log = $('log');\n"
+        "          log.hidden = false;\n"
+        "          // Only auto-scroll when already at the bottom, so reading\n"
+        "          // back through a run isn't yanked away by new output.\n"
+        "          var atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;\n"
+        "          log.textContent += d.lines.join('\\n') + '\\n';\n"
+        "          if (atEnd) { log.scrollTop = log.scrollHeight; }\n"
+        "        }\n"
+        "      })\n"
+        "      .catch(function () { $('run-state').textContent = 'disconnected'; });\n"
+        "  }\n"
+        "  function refreshCards() {\n"
+        "    fetch('/?k=' + encodeURIComponent(KEY))\n"
+        "      .then(function (r) { return r.text(); })\n"
+        "      .then(function (html) {\n"
+        "        var fresh = new DOMParser().parseFromString(html, 'text/html')\n"
+        "          .getElementById('cards');\n"
+        "        if (fresh) { $('cards').innerHTML = fresh.innerHTML; }\n"
+        "      })\n"
+        "      .catch(function () { /* a dropped refresh is harmless; the next one retries */ });\n"
+        "  }\n"
+        "  $('btn-run').addEventListener('click', function () {\n"
+        "    setRunning(true);\n"
+        "    post('/api/run').then(function (d) { if (d && !d.ok) { setRunning(false); } });\n"
+        "  });\n"
+        "  $('btn-stop').addEventListener('click', function () {\n"
+        "    $('btn-stop').disabled = true;\n"
+        "    toast('Stopping after the current block...');\n"
+        "    post('/api/stop');\n"
+        "  });\n"
+        "  // Destructive buttons arm on the first click and fire on the second,\n"
+        "  // rather than opening a confirm() dialog: the question stays where\n"
+        "  // the button is, and a stray click cannot clear a queue.\n"
+        "  var armed = null;\n"
+        "  function disarm() {\n"
+        "    if (!armed) { return; }\n"
+        "    armed.textContent = armed.dataset.label;\n"
+        "    armed.classList.remove('btn-armed');\n"
+        "    armed = null;\n"
+        "  }\n"
+        "  function runCommand(btn) {\n"
+        "    var name = btn.dataset.cmd;\n"
+        "    var out = $('cmdout');\n"
+        "    btn.disabled = true;\n"
+        "    toast('Running ' + name + '...');\n"
+        "    post('/api/command', { name: name, confirm: true }).then(function (d) {\n"
+        "      btn.disabled = false;\n"
+        "      if (!d) { return; }\n"
+        "      out.hidden = false;\n"
+        "      out.textContent = d.output || d.message || '(no output)';\n"
+        "      out.scrollTop = 0;\n"
+        "      refreshCards();\n"
+        "    });\n"
+        "  }\n"
+        "  document.addEventListener('click', function (ev) {\n"
+        "    var btn = ev.target.closest ? ev.target.closest('[data-cmd]') : null;\n"
+        "    if (!btn) { disarm(); return; }\n"
+        "    if (!btn.dataset.confirm) { runCommand(btn); return; }\n"
+        "    if (armed === btn) { disarm(); runCommand(btn); return; }\n"
+        "    disarm();\n"
+        "    armed = btn;\n"
+        "    btn.dataset.label = btn.dataset.label || btn.textContent;\n"
+        "    btn.textContent = btn.dataset.confirm;\n"
+        "    btn.classList.add('btn-armed');\n"
+        "  });\n"
+        "  // Delegated, because the account rows are replaced wholesale by\n"
+        "  // every card refresh and per-row listeners would not survive it.\n"
+        "  document.addEventListener('click', function (ev) {\n"
+        "    var btn = ev.target.closest ? ev.target.closest('.acct-toggle') : null;\n"
+        "    if (!btn) { return; }\n"
+        "    btn.disabled = true;\n"
+        "    post('/api/account', {\n"
+        "      name: btn.dataset.name,\n"
+        "      enabled: btn.dataset.enable === 'true'\n"
+        "    }).then(refreshCards);\n"
+        "  });\n"
+        "  pollState();\n"
+        "  setInterval(pollState, 1200);\n"
+        "  setInterval(refreshCards, 6000);\n"
+        "})();\n"
+        "</script>"
+    )
+
+
+def _accounts_card(storage: StorageService, live: bool = False) -> str:
+    """Render the pooled subscriptions and which of them a run may use now.
+
+    Omitted entirely when there is no accounts file, which is the normal case
+    for a single-subscription machine -- an empty card would just be a question
+    mark on every dashboard that will never have an answer.
+
+    **Only names and states are read.** `Account.__repr__` keeps tokens out of
+    logs for the same reason this keeps them out of the page: `dashboard.html`
+    lives in `.sandglass/`, inside the project tree, where any block running
+    under `bypassPermissions` can read it.
+    """
+    try:
+        from .accounts import AccountPool
+
+        pool = AccountPool.load()
+        if pool is None:
+            return ""
+        pool.state_path = storage.accounts_state_path
+        pool.load_state()
+        accounts = list(pool.accounts)
+    except Exception as exc:  # noqa: BLE001 - see below
+        # Deliberately broad. This runs after every completed block in an
+        # unattended run; a malformed accounts file must cost the dashboard one
+        # card, never the run. The CLI reports the same fault properly, with a
+        # human present to read it.
+        logger.warning("Could not read the account pool for the dashboard: %s", exc)
+        return ""
+
+    if not accounts:
+        return ""
+
+    rows = []
+    usable = 0
+    for account in accounts:
+        if not account.enabled:
+            color, label = _IDLE_COLOR, "disabled"
+        elif account.is_available():
+            color, label = _GREEN, "quota available"
+            usable += 1
+        else:
+            # Local wall-clock, matching `sandglass accounts`: this line answers
+            # "how long until it can run again", and 14:35 answers that at a
+            # glance in a way an ISO timestamp does not.
+            back = datetime.fromtimestamp(account.exhausted_until).strftime("%H:%M")
+            color, label = _YELLOW, f"spent — back around {back}"
+        # On a served page each row also carries the one control that makes
+        # sense for it: park it, or bring it back. The button is rendered from
+        # the same state the label is, so the two can never disagree.
+        toggle = ""
+        if live:
+            action = "enable" if not account.enabled else "disable"
+            toggle = (
+                f'<button class="btn btn-mini acct-toggle" data-name="'
+                f'{html.escape(account.name, quote=True)}" data-enable='
+                f'"{"true" if not account.enabled else "false"}">'
+                f'{"Enable" if action == "enable" else "Park"}</button>'
+            )
+        rows.append(
+            '<div class="acct">'
+            f'<span class="acct-dot" style="--c:{color}"></span>'
+            f'<span class="acct-name">{html.escape(account.name)}</span>'
+            f'<span class="acct-state">{html.escape(label)}</span>'
+            f"{toggle}"
+            "</div>"
+        )
+
+    summary = f"{usable} of {len(accounts)} ready to run"
+    return (
+        '<section class="card">'
+        "<h2>Accounts</h2>"
+        '<div class="accts">' + "".join(rows) + "</div>"
+        f'<div class="status-detail">{html.escape(summary)}</div>'
+        "</section>"
+    )
+
+
+def _providers_card(registry=None) -> str:
+    """Render the non-Anthropic endpoints a block can be routed to.
+
+    Kept as a separate card from Accounts rather than four rows in one list,
+    because the two are not the same kind of thing and reading them as one would
+    be actively misleading. A Claude account is flat-rate with a quota that
+    refreshes on a clock, and the pool reaches for the next one by itself. A
+    provider is metered, has a balance rather than a window, and is **never**
+    used unless a block asks for it by name -- so "deepseek: ready" must not be
+    read as "some of my work is going there".
+
+    ``registry`` is the run's live one when this is regenerated mid-run, which
+    is the only way the out-of-credit state can be known: it is per-run and
+    deliberately never persisted, so a dashboard generated from a different
+    process cannot see it and does not pretend to.
+
+    **Key counts, never keys.** Same reason as the accounts card: this page is
+    written inside the project tree.
+    """
+    try:
+        from . import providers as providers_mod
+
+        if registry is None:
+            registry = providers_mod.ProviderRegistry.load()
+        known = sorted(providers_mod.PROVIDERS.items())
+    except Exception as exc:  # noqa: BLE001 - a broken file costs a card, not a run
+        logger.warning("Could not read providers for the dashboard: %s", exc)
+        return ""
+
+    if not known:
+        return ""
+
+    rows = []
+    configured = 0
+    for name, provider in known:
+        key = registry.key_for(name) if registry else None
+        count = registry.key_count(name) if registry else 0
+        spent = bool(registry and registry.is_out_of_credit(name))
+
+        if spent:
+            # Only ever true mid-run. A human topping the account up is what
+            # undoes this, not waiting, so it is phrased as an instruction.
+            color, label = _RED, "out of credit — blocks fall back to Claude"
+        elif key:
+            problem = providers_mod.looks_malformed(key)
+            if problem:
+                color, label = _YELLOW, f"key looks wrong: {problem}"
+            else:
+                configured += 1
+                # The count is operational, not trivia: with one key, running
+                # out mid-run puts every block marked for it back on Claude
+                # quota; with two, the run just moves to the second.
+                color = _GREEN
+                label = f"{count} keys · metered" if count > 1 else "1 key · metered"
+        else:
+            color, label = _IDLE_COLOR, f"no key — sandglass providers set {name}"
+
+        rows.append(
+            '<div class="acct">'
+            f'<span class="acct-dot" style="--c:{color}"></span>'
+            f'<span class="acct-name">{html.escape(name)}</span>'
+            f'<span class="acct-state">{html.escape(label)}</span>'
+            "<span></span>"
+            "</div>"
+        )
+
+    note = (
+        "Pay-per-token, and opt-in per block — a block reaches one of these only "
+        "by asking (provider: / CLINE:). Nothing routes here on its own."
+    )
+    return (
+        '<section class="card">'
+        "<h2>External providers</h2>"
+        '<div class="accts">' + "".join(rows) + "</div>"
+        f'<div class="status-detail">{html.escape(note)}</div>'
+        "</section>"
+    )
+
+
+def generate(
+    source_file: str,
+    title: str,
+    storage: StorageService | None = None,
+    live_key: str | None = None,
+    registry=None,
+) -> str:
     """Render the dashboard as a self-contained HTML string.
 
     ``source_file`` is the markdown queue source (``prompt_tools/future_prompts.md``
     by convention) -- the same argument `prompt_source.throughput` and
     `phase_breakdown` already take, so this reads exactly what those do.
+
+    ``live_key`` turns the page from a display into a control panel: it is the
+    per-process key `webui.serve` mints, and passing it adds the Run/Stop
+    buttons, the account toggles and the live log, all of which need something
+    listening to be anything other than decoration. A page written to a file
+    never gets one, so the static dashboard stays exactly what it was.
     """
     storage = storage or StorageService()
     counted = prompt_source.throughput(source_file)
@@ -147,7 +489,24 @@ def generate(source_file: str, title: str, storage: StorageService | None = None
         </div>
         """
 
+    live = bool(live_key)
     phases_section = _phase_rows(phases)
+    accounts_section = _accounts_card(storage, live=live)
+    providers_section = _providers_card(registry)
+    control_section = _control_bar(live)
+    # A served page refreshes itself from JavaScript, which can leave the log
+    # scrolled where you left it and a button focused. A meta refresh would
+    # throw both away every few seconds, mid-click.
+    refresh_meta = (
+        "" if live else f'<meta http-equiv="refresh" content="{_REFRESH_SECONDS}">'
+    )
+    footer_text = (
+        "Live — buttons act on this machine. Ctrl-C in the terminal closes it."
+        if live
+        else f"Auto-refreshes every {_REFRESH_SECONDS}s — regenerated by "
+        "Sandglass after every completed block."
+    )
+    live_script = _live_script(live_key) if live else ""
     safe_title = html.escape(title)
     icon_uri = _icon_data_uri()
     hero_section = (
@@ -169,7 +528,7 @@ def generate(source_file: str, title: str, storage: StorageService | None = None
 <head>
 <meta charset="utf-8">
 <title>{safe_title} — Sandglass</title>
-<meta http-equiv="refresh" content="{_REFRESH_SECONDS}">
+{refresh_meta}
 <style>
   :root {{
     --bg: #0b0f17;
@@ -274,6 +633,37 @@ def generate(source_file: str, title: str, storage: StorageService | None = None
     border-radius: 999px;
   }}
   .phase-count {{ font-size: 0.8rem; color: var(--muted); min-width: 3.5rem; text-align: right; }}
+  .accts {{ display: flex; flex-direction: column; gap: 0.55rem; }}
+  .acct {{ display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 0.6rem; }}
+  .acct-dot {{
+    width: 9px; height: 9px; border-radius: 50%; background: var(--c);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 22%, transparent);
+  }}
+  .acct-name {{ font-size: 0.85rem; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .acct-state {{ font-size: 0.78rem; color: var(--muted); text-align: right; }}
+  .controls {{ display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }}
+  .btn {{
+    font: inherit; font-size: 0.85rem; font-weight: 600; letter-spacing: 0.01em;
+    color: var(--text); background: var(--card); border: 1px solid var(--border);
+    border-radius: 9px; padding: 0.5rem 1rem; cursor: pointer;
+    transition: transform 0.08s ease, filter 0.15s ease, opacity 0.15s ease;
+  }}
+  .btn:hover:not(:disabled) {{ filter: brightness(1.25); }}
+  .btn:active:not(:disabled) {{ transform: translateY(1px); }}
+  .btn:disabled {{ opacity: 0.4; cursor: default; }}
+  .btn-go {{ background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; color: #0b0f17; }}
+  .btn-stop {{ border-color: {_RED}; color: {_RED}; }}
+  .btn-mini {{ padding: 0.25rem 0.6rem; font-size: 0.72rem; font-weight: 500; }}
+  .run-state {{ font-size: 0.8rem; color: var(--muted); }}
+  .hint {{ margin-top: 0.7rem; font-size: 0.75rem; line-height: 1.55; color: var(--muted); }}
+  .btn-armed {{ border-color: {_RED}; background: {_RED}; color: #0b0f17; }}
+  .toast {{ margin-top: 0.7rem; font-size: 0.8rem; color: var(--muted); min-height: 1.1em; }}
+  .log {{
+    margin-top: 0.9rem; max-height: 22rem; overflow: auto; white-space: pre-wrap;
+    word-break: break-word; font-size: 0.75rem; line-height: 1.5;
+    color: var(--muted); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 9px; padding: 0.75rem 0.9rem;
+  }}
   footer {{ text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 1rem; }}
 
   .hero {{ display: flex; justify-content: center; padding: 0.5rem 0 2rem; }}
@@ -327,6 +717,8 @@ def generate(source_file: str, title: str, storage: StorageService | None = None
       <div class="timestamp">Updated {generated_at}</div>
     </header>
     {hero_section}
+    {control_section}
+    <div id="cards">
     <section class="card">
       <h2>Status</h2>
       <span class="badge"><span class="dot"></span>{html.escape(status_label)}</span>
@@ -340,19 +732,35 @@ def generate(source_file: str, title: str, storage: StorageService | None = None
 
     {phases_section}
 
-    <footer>Auto-refreshes every {_REFRESH_SECONDS}s — regenerated by Sandglass after every completed block.</footer>
+    {accounts_section}
+
+    {providers_section}
+    </div>
+
+    <footer>{footer_text}</footer>
   </div>
+{live_script}
 </body>
 </html>
 """
 
 
-def write(source_file: str, title: str, storage: StorageService | None = None) -> str:
-    """Generate and save the dashboard, returning the path written to."""
+def write(
+    source_file: str,
+    title: str,
+    storage: StorageService | None = None,
+    registry=None,
+) -> str:
+    """Generate and save the dashboard, returning the path written to.
+
+    ``registry`` is the run's live `ProviderRegistry` when a run is what is
+    calling. Passing it is the only way the page can show a vendor that has run
+    out of credit, since that state is per-run and never written to disk.
+    """
     storage = storage or StorageService()
     storage.ensure_sandglass_dir()
     path = os.path.join(storage.base_path, DASHBOARD_FILENAME)
-    html_text = generate(source_file, title, storage=storage)
+    html_text = generate(source_file, title, storage=storage, registry=registry)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(html_text)
     return path

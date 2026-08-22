@@ -597,6 +597,31 @@ sandglass execute --once
 Ctrl-C at any point during a wait stops cleanly — the queue is exactly as it
 was, nothing is lost.
 
+### Parking an account for the rest of the week
+
+Weekly limits are not nightly ones. When one of your accounts is done for the
+week, leaving it in the pool costs you a block on every run — the rotation lands
+on it, burns a real request finding out it is still spent, then moves on. Park it
+instead:
+
+```bash
+sandglass accounts --disable work     # every run skips it from now on
+sandglass accounts --enable work      # put it back
+```
+
+Both commands print the pool straight afterwards, so you can see the result
+without running a second command. A parked account shows as `○ disabled`, and
+`sandglass accounts --probe` skips it rather than spending tokens on it.
+
+**When not to use it:** not for an account that is merely out of quota *today*.
+Sandglass already tracks that on its own and brings the account back the moment
+its window refreshes, whereas disabling is a standing decision that nothing but
+you will ever undo. Use it for the week-long case, or for an account you want
+kept out of a particular stretch of work.
+
+Sandglass will not let you disable your last enabled account: a pool with
+nothing in it cannot run anything.
+
 ---
 
 ## 7. Understanding permission mode
@@ -665,18 +690,23 @@ Sandglass is built so a bad run never loses your queue:
 | `sandglass execute --no-brief` | Don't inject the project-state brief; let each block read the full work log (see §12) |
 | `sandglass execute --session-mode MODE` | `chain` (default), `prompt`, or `isolate` — how much context blocks share (see §6) |
 | `sandglass execute --no-tiers` | Ignore `TIER:` markers in block text (see §4) |
+| `sandglass accounts` | List pooled subscriptions and which have quota now (see §6) |
+| `sandglass accounts --probe` | Spend one tiny request per account to prove each token still works |
+| `sandglass accounts --disable NAME` | Park an account — every run skips it until you re-enable it (see §6) |
+| `sandglass accounts --enable NAME` | Put a parked account back into the rotation |
 | `sandglass rotate-logs [--keep N]` | Archive old work-log / prompt-history entries (see §12) |
 | `sandglass update [--check]` | Update Sandglass itself from its git repo (see §2) |
 | `sandglass history` | Show everything ever completed, with tokens and cost |
 | `sandglass responses list` | List saved response files |
 | `sandglass responses show INDEX` | Read one saved response in full |
 | `sandglass dashboard [--no-open]` | Write and open a visual status page (see §13) |
+| `sandglass ui [--port N] [--no-open]` | Serve that page with working Run/Stop buttons (see §13) |
 | `sandglass sleeptime` | Show the hours when notifications are silenced (see §13) |
 | `sandglass sleeptime START END` | Set them, e.g. `sandglass sleeptime 22 6` (default 22:00–06:00) |
 | `sandglass sleeptime --off` / `--on` | Silence nothing / restore the saved window |
 | `sandglass commands` | List every command with a one-line description |
 | `sandglass version` | Print the installed version |
-| `sandglass new-claude-project [PATH]` | Scaffold `CLAUDE.md` + `master_plan/` + `prompt_tools/` into a new project (see §14) |
+| `sandglass new-claude-project [PATH]` | Scaffold `CLAUDE.md` + `AGENTS.md` + `master_plan/` + `prompt_tools/` into a new project (see §14) |
 | `sandglass claude-md-update [SOURCE]` | Adopt `SOURCE` as the template `new-claude-project` will use next (see §14) |
 
 ---
@@ -893,11 +923,87 @@ current run state (idle, running, waiting out a quota, or stopped with why),
 and — if any block in the queue sets a `phase:` (see §4) — a bar per phase
 so you can see which stage of a larger project is furthest along.
 
+If you run with pooled accounts (§6), it also shows an **Accounts** panel: one
+line per subscription, green for ready, amber for spent with the time it comes
+back, grey for parked, and a count of how many can run right now. Only names and
+states appear there — never a token — because the page is written inside your
+project directory where any block can read it.
+
+Below that, **External providers** lists the non-Claude endpoints you've set up
+(DeepSeek, §4) — green with how many keys are configured, grey if there's no key
+yet, red if a vendor has run out of credit mid-run. These are deliberately a
+separate panel from your accounts, because they work differently: they're
+**pay-per-token**, and **nothing goes to them unless a block asks by name**. A
+green dot there means "available if a block asks for it", not "some of your work
+is going there".
+
+One thing that panel can only show *during* a run: **out of credit**. Sandglass
+tracks a spent balance for the length of one run and never writes it down —
+a balance is fixed by paying, not by waiting, so remembering it overnight would
+bench a freshly topped-up key for no reason. Open the page outside a run and
+you'll see the key count, not the balance.
+
 It's a plain file, not a running web server: nothing to leave open, nothing
 to remember to shut down. `sandglass execute` rewrites it after every
 completed block, and the page itself reloads every 8 seconds, so a browser
 tab left open during a long run keeps catching up on its own — close it any
 time, reopen it with the command above.
+
+### Buttons instead of typing — `sandglass ui`
+
+The dashboard above is a **display**: it shows you things, but you can't click
+anything, because a page opened straight from a file isn't allowed to start
+programs on your computer. If you'd rather press a button than type
+`sandglass execute`, use this instead:
+
+```bash
+sandglass ui                 # prints a link and opens it in your browser
+sandglass ui --no-open       # just print the link
+```
+
+The page looks the same, with a **Run** card added at the top:
+
+- **▶ Run queue** — starts the queue, exactly as if you'd typed
+  `sandglass execute`. The output appears live in the page as it happens, so you
+  don't need to watch the terminal.
+- **■ Stop** — stops it the same way pressing Ctrl-C would: it finishes tidying
+  up and your queue is left exactly as it was, nothing lost.
+- **Park / Enable** on each account row — the same thing as
+  `sandglass accounts --disable` / `--enable` (§6), one click.
+
+A **Queue** card sits underneath it. Everything on it is free — none of these
+buttons sends a prompt to a model:
+
+- **Show queue** — what's queued right now, with each block's model and effort.
+- **Check for problems** — the pre-flight check (§3): blocks that reference a
+  file that doesn't exist, empty blocks, bad effort values. Worth a click before
+  a long run; it costs nothing and catches the mistakes that waste one.
+- **Dry run** — preview the whole run without sending anything.
+- **Why did it stop?** — the reason the last run ended. Read this before
+  starting another one.
+- **Clear queue** — empties Sandglass's copy of the queue. It asks you to click
+  a second time to confirm, and refuses entirely while a run is going.
+
+**About Clear queue:** it is less alarming than it sounds. If your blocks came
+from a markdown file (§5) they are still in that file and get re-imported on the
+next run — clearing is in fact the normal repair when you've edited
+`future_prompts.md` and Sandglass is still holding the older copy. The one case
+where it does lose something is blocks you typed in directly with
+`sandglass queue add`, which have no file behind them.
+
+**Gotchas, and when not to use it:**
+
+- **Leave the terminal window open.** This one is not a background service — the
+  window running `sandglass ui` *is* the program. Closing it, or pressing Ctrl-C,
+  shuts the page down and stops any run it started.
+- **Treat the link as a password.** It contains a key, and anyone who has it can
+  start runs on your machine. Don't paste it into chat, an issue, or a
+  screenshot. It changes every time you start the command, so an old one is
+  harmless.
+- It only listens to your own computer — nobody else on your network can reach
+  it, even if they know the port.
+- For an unattended overnight run, plain `sandglass execute` is still the right
+  thing. This is for when you're around and want to watch and steer.
 
 ### Sleep time — silencing notifications overnight
 

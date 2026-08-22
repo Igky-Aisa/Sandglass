@@ -75,6 +75,13 @@ class Account:
     # supplies -- so the pool knows not just that an account is done, but when
     # it comes back.
     exhausted_until: Optional[float] = None
+    # Whether the pool may draw on this account at all. Distinct from
+    # `exhausted_until` on purpose: exhaustion is transient and clears itself
+    # when the window refreshes, whereas disabled is a standing decision by a
+    # human and is undone only by another one. Persisted in the accounts file
+    # (see `set_enabled`), because "skip this one until I say otherwise" has to
+    # survive the run that was told it.
+    enabled: bool = True
     # Per-run accounting, reported at the end so a rotated run can be read as
     # "what did each account actually do" rather than one merged total.
     blocks: int = 0
@@ -82,6 +89,8 @@ class Account:
     cost_usd: float = 0.0
 
     def is_available(self, now: Optional[float] = None) -> bool:
+        if not self.enabled:
+            return False
         if self.exhausted_until is None:
             return True
         return (now if now is not None else time.time()) >= self.exhausted_until
@@ -89,7 +98,10 @@ class Account:
     def __repr__(self) -> str:  # pragma: no cover - defensive, not logic
         # A token must not reach a traceback, a log line, or a debugger's
         # locals dump. The default dataclass repr would print it in all three.
-        state = "available" if self.is_available() else "exhausted"
+        if not self.enabled:
+            state = "disabled"
+        else:
+            state = "available" if self.is_available() else "exhausted"
         return f"<Account {self.name!r} {state}>"
 
 
@@ -213,11 +225,34 @@ class AccountPool:
             if name in seen:
                 raise AccountsError(f"{path}: duplicate account name {name!r}.")
             seen.add(name)
-            accounts.append(Account(name=name, token=token))
+            accounts.append(
+                Account(name=name, token=token, enabled=_entry_enabled(entry))
+            )
+
+        # A pool where every account is switched off is not a degraded pool, it
+        # is an unusable one: `advance()` would find nothing and `earliest_reset`
+        # has no time to offer, so the engine would wait for a refresh that is
+        # never coming. Say so at load, where the fix is obvious.
+        if not any(a.enabled for a in accounts):
+            raise AccountsError(
+                f"{path}: every account is disabled, so no block could run. "
+                "Re-enable one with `sandglass accounts --enable <name>`."
+            )
+
+        # Start on an account that may actually be used. Exhaustion is applied
+        # later by `load_state`, but disabled is known right now, and beginning
+        # on a disabled account would put its name in `history` as though the
+        # run had touched it.
+        index = next(i for i, a in enumerate(accounts) if a.enabled)
 
         _warn_if_world_readable(path)
-        logger.info("Loaded %d account(s) from %s", len(accounts), path)
-        return cls(accounts=accounts)
+        disabled = [a.name for a in accounts if not a.enabled]
+        logger.info(
+            "Loaded %d account(s) from %s%s",
+            len(accounts), path,
+            f" ({len(disabled)} disabled: {', '.join(disabled)})" if disabled else "",
+        )
+        return cls(accounts=accounts, index=index)
 
     # --- Current account -------------------------------------------------
 
@@ -266,8 +301,17 @@ class AccountPool:
         return None
 
     def earliest_reset(self) -> Optional[float]:
-        """When the first exhausted account comes back, in epoch seconds."""
-        times = [a.exhausted_until for a in self.accounts if a.exhausted_until]
+        """When the first exhausted account comes back, in epoch seconds.
+
+        Disabled accounts are excluded: their quota may well refresh at a known
+        time, but the pool still won't use them, so counting one here would make
+        the engine wake up to an account it is not allowed to touch.
+        """
+        times = [
+            a.exhausted_until
+            for a in self.accounts
+            if a.exhausted_until and a.enabled
+        ]
         return min(times) if times else None
 
     def clear_expired(self) -> None:
@@ -379,3 +423,116 @@ def _warn_if_world_readable(path: Path) -> None:
             "%s is readable by other users on this machine. "
             "Restrict it with `chmod 600 %s`.", path, path,
         )
+
+
+def _entry_enabled(entry: dict) -> bool:
+    """Read an account entry's on/off state, accepting either spelling.
+
+    `{"enabled": false}` and `{"disabled": true}` are both obvious things to
+    write by hand, so both are honoured. `enabled` wins when a file somehow
+    carries both, and anything unparseable counts as enabled -- the safe
+    direction, since a typo that silently benched an account would look exactly
+    like the quota problems this pool exists to solve.
+    """
+    if "enabled" in entry:
+        return bool(entry.get("enabled"))
+    if "disabled" in entry:
+        return not bool(entry.get("disabled"))
+    return True
+
+
+def set_enabled(
+    name: str,
+    enabled: bool,
+    path: Optional[Path] = None,
+) -> bool:
+    """Flip one account's `enabled` flag in the accounts file, in place.
+
+    Returns True if the file changed, False if it already said that.
+
+    Written back to the accounts file rather than to the run-state file next to
+    the exhaustion times, because the two answer different questions. Exhaustion
+    is a fact about the last few hours that expires on its own; disabled is an
+    instruction, and an instruction that evaporated when the state file was
+    cleaned would be worse than not having the command at all.
+
+    The write is careful in two ways that matter for a file holding live
+    credentials: it is read-modify-write on the parsed JSON, so every key it
+    doesn't understand (tokens included) is carried through untouched, and the
+    replacement is staged in a 0600 temp file in the same directory and moved
+    into place with `os.replace`, so an interrupted write can never leave a
+    truncated token file behind.
+    """
+    path = path or AccountPool.default_path()
+    if not path.exists():
+        raise AccountsError(
+            f"No accounts file at {path}. There is nothing to enable or disable."
+        )
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AccountsError(f"Could not read {path}: {exc}") from exc
+
+    entries = raw.get("accounts") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list) or not entries:
+        raise AccountsError(f"{path} has no 'accounts' list.")
+
+    names = [
+        str(e.get("name") or f"account-{i + 1}")
+        for i, e in enumerate(entries)
+        if isinstance(e, dict)
+    ]
+    if name not in names:
+        raise AccountsError(
+            f"No account named {name!r} in {path}. Known: {', '.join(names)}."
+        )
+
+    target = names.index(name)
+    if not enabled:
+        # Refuse to switch off the last one standing. `AccountPool.load` treats
+        # an all-disabled file as an error, so allowing it here would produce a
+        # file that the next run cannot start from -- and the person who ran
+        # this command is not the one who would have to work out why.
+        still_on = [
+            n
+            for i, n in enumerate(names)
+            if _entry_enabled(entries[i]) and i != target
+        ]
+        if not still_on:
+            raise AccountsError(
+                f"{name!r} is the only enabled account left; disabling it would "
+                "leave the pool with nothing to run on. Enable another first."
+            )
+
+    entry = entries[target]
+    if _entry_enabled(entry) == enabled:
+        return False
+
+    entry["enabled"] = enabled
+    # Never leave both spellings behind: a stale `disabled` key that disagrees
+    # with the one just written is a bug waiting for whoever reads the file next.
+    entry.pop("disabled", None)
+
+    _atomic_write_json(path, raw)
+    logger.info("%s account %r in %s", "Enabled" if enabled else "Disabled", name, path)
+    return True
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    """Replace ``path`` with ``payload`` as JSON, without ever truncating it."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        # 0600 from creation, not chmod-after: on POSIX the file must never
+        # exist, even briefly, in a mode another user could read a token from.
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+        os.replace(str(tmp), str(path))
+    except OSError as exc:
+        try:
+            os.unlink(str(tmp))
+        except OSError:
+            pass
+        raise AccountsError(f"Could not write {path}: {exc}") from exc
