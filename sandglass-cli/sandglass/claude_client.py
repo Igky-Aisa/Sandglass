@@ -64,6 +64,47 @@ _CREDIT_ERROR_MARKERS = (
 )
 
 
+# Refusals that are about the network or the far end being briefly unwell,
+# rather than about this prompt, this account, or this balance. Matched on
+# wording for the same reason the credit markers are: the error reaches
+# Sandglass as the CLI's one-line string with no status code of its own.
+#
+# Each of these is worth retrying *unchanged* in a few minutes. That is what
+# separates them from everything else in this module -- a quota hit needs a
+# different account, a credit refusal needs money, a bad prompt needs a human,
+# and none of those get better by asking again.
+_TRANSIENT_ERROR_MARKERS = (
+    "connection lost",
+    "connection reset",
+    "connection closed",
+    "connection aborted",
+    "connection refused",
+    "connection error",
+    "network error",
+    "socket hang up",
+    "econnreset",
+    "econnrefused",
+    "etimedout",
+    "enotfound",
+    "eai_again",
+    "fetch failed",
+    "request timed out",
+    "read timeout",
+    "gateway timeout",
+    "service unavailable",
+    "bad gateway",
+    "internal server error",
+    # Anthropic's 529: the API is up but shedding load. The single most common
+    # cause of a batch dying overnight for no reason anyone can point at.
+    "overloaded",
+    "overloaded_error",
+    "temporarily unavailable",
+    "try again later",
+    # The CLI's own wording when a response is cut off part-way through.
+    "may be incomplete",
+)
+
+
 class ClaudeCLINotFoundError(RuntimeError):
     """Raised when the `claude` binary isn't on PATH."""
 
@@ -135,6 +176,32 @@ class ProviderCreditExhaustedError(RuntimeError):
         # Same reason QuotaExceededError carries one: the refusal interrupts
         # work that was never done, and the retry (on another key, or on
         # Claude) should continue the conversation rather than start cold.
+        self.session_id = session_id
+
+
+class TransientConnectionError(RuntimeError):
+    """Raised when a block died to the network rather than to anything real.
+
+    A connection dropped mid-response, a 529 "overloaded", a gateway timeout:
+    the prompt is fine, the account is fine, the balance is fine, and the only
+    thing wrong is *when* it was asked. Deliberately distinct from every other
+    error in this module because the correct response is distinct too --
+
+    - :class:`QuotaExceededError` -> use a different account, or wait for the clock
+    - :class:`ProviderCreditExhaustedError` -> use a different key, or pay
+    - a plain ``RuntimeError`` -> stop; a human has to look at it
+    - this -> **wait a few minutes and ask again, unchanged**
+
+    Before this existed, a dropped connection at 3am fell through to the
+    generic handler and killed the rest of the night's queue over something
+    that would have worked on the next attempt.
+    """
+
+    def __init__(self, message: str, session_id: Optional[str] = None):
+        super().__init__(message)
+        # Carried for the same reason the other two carry one: the drop
+        # interrupted work that was never finished, so the retry should rejoin
+        # the conversation and continue rather than start it again from cold.
         self.session_id = session_id
 
 
@@ -404,6 +471,14 @@ class ClaudeClient:
                     rate_limit_info=rate_limit_info,
                     session_id=observed_session_id or resume_session_id,
                 )
+            if self._looks_like_transient_error(error_text):
+                # Checked after quota and credit, never before: those two also
+                # arrive as plain strings, and a rate limit that happened to
+                # say "try again later" must stay a rate limit.
+                raise TransientConnectionError(
+                    error_text,
+                    session_id=observed_session_id or resume_session_id,
+                )
             if (
                 resume_session_id
                 and not _retried
@@ -510,6 +585,19 @@ class ClaudeClient:
         return "402" in lowered and any(
             word in lowered for word in ("balance", "credit", "payment", "fund")
         )
+
+    @staticmethod
+    def _looks_like_transient_error(text: str) -> bool:
+        """Whether this refusal is worth simply asking again in a few minutes.
+
+        Only consulted *after* the quota and credit checks have said no, which
+        is what keeps it from swallowing them: a rate limit that happens to be
+        worded "please try again later" is a rate limit, and treating it as a
+        blip would retry into the same wall three times instead of rotating to
+        an account that has quota left.
+        """
+        lowered = (text or "").lower()
+        return any(marker in lowered for marker in _TRANSIENT_ERROR_MARKERS)
 
     @staticmethod
     def _looks_like_quota_error(text: str, rate_limit_info: Optional[dict]) -> bool:

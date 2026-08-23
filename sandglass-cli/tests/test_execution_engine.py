@@ -898,3 +898,141 @@ def test_manually_added_prompts_are_never_gated(qm, tmp_path, monkeypatch):
 
     assert result.stopped_reason is None
     assert result.completed == 1
+
+
+# --- Dropped connections ------------------------------------------------------
+#
+# A block that dies to the network died to nothing real: the prompt is fine, the
+# account is fine, the balance is fine, and only the timing was wrong. Before
+# this, such a failure fell through to the generic handler and killed the rest of
+# the night's queue. What these check is that it retries, that it stops retrying,
+# and -- the part with teeth -- that it never swallows a failure that needs a
+# different response entirely.
+
+from sandglass.claude_client import TransientConnectionError
+from sandglass.models import PromptObject
+
+
+class _DropsThenSucceeds:
+    """Fails with a dropped connection `drops` times, then returns a Response."""
+
+    def __init__(self, drops: int):
+        self.drops = drops
+        self.calls = 0
+
+    async def __call__(self, prompt):
+        self.calls += 1
+        if self.calls <= self.drops:
+            raise TransientConnectionError("Connection lost mid-response.")
+        return Response(prompt_id=prompt.id, text="done", tokens_used=1)
+
+
+def _engine_with(monkeypatch, fake, **kwargs):
+    qm = QueueManager(storage=StorageService(base_path=kwargs.pop("base_path")))
+    engine = ExecutionEngine(
+        qm,
+        None,  # every call is monkeypatched below; the client is never reached
+        connection_wait_seconds=0,  # the wait itself is not what is under test
+        **kwargs,
+    )
+    monkeypatch.setattr(engine, "execute_prompt", fake)
+    # The animation is a five-minute sleep in production; make it instant.
+    async def _no_wait(*_a, **_k):
+        return None
+    monkeypatch.setattr(engine, "_sleep_with_animation", _no_wait)
+    return engine
+
+
+def _prompt():
+    return PromptObject(id="p1", text="do the thing", title="a block")
+
+
+def test_a_dropped_connection_is_retried_not_fatal(tmp_path, monkeypatch):
+    fake = _DropsThenSucceeds(drops=2)
+    engine = _engine_with(monkeypatch, fake, base_path=str(tmp_path / ".sandglass"))
+
+    result = asyncio.run(engine._execute_with_rotation(_prompt()))
+
+    assert result.text == "done"
+    # Two drops, then the third attempt worked -- the block was retried, never
+    # skipped: it interrupted work that had not actually been done.
+    assert fake.calls == 3
+
+
+def test_retries_are_bounded_and_then_it_gives_up(tmp_path, monkeypatch):
+    fake = _DropsThenSucceeds(drops=99)
+    engine = _engine_with(
+        monkeypatch, fake, base_path=str(tmp_path / ".sandglass"), connection_retries=3
+    )
+
+    with pytest.raises(TransientConnectionError):
+        asyncio.run(engine._execute_with_rotation(_prompt()))
+
+    # One real attempt plus three retries. A fault outlasting that is no longer
+    # a blip and a human should see it, rather than the queue grinding on it.
+    assert fake.calls == 4
+
+
+def test_retries_can_be_turned_off(tmp_path, monkeypatch):
+    fake = _DropsThenSucceeds(drops=99)
+    engine = _engine_with(
+        monkeypatch, fake, base_path=str(tmp_path / ".sandglass"), connection_retries=0
+    )
+
+    with pytest.raises(TransientConnectionError):
+        asyncio.run(engine._execute_with_rotation(_prompt()))
+    assert fake.calls == 1
+
+
+def test_the_budget_is_per_block_not_per_run(tmp_path, monkeypatch):
+    # A blip on block 3 says nothing about block 4. Carrying the count forward
+    # would leave a long queue with no retries left when it finally needed one.
+    fake = _DropsThenSucceeds(drops=2)
+    engine = _engine_with(monkeypatch, fake, base_path=str(tmp_path / ".sandglass"))
+
+    asyncio.run(engine._execute_with_rotation(_prompt()))
+    fake.drops, fake.calls = 2, 0
+    asyncio.run(engine._execute_with_rotation(_prompt()))
+    assert fake.calls == 3
+
+
+# --- What must NOT be treated as a blip --------------------------------------
+
+
+def test_a_rate_limit_worded_like_a_blip_is_still_a_rate_limit():
+    from sandglass.claude_client import ClaudeClient
+
+    # "try again later" is in the transient markers, but the quota check runs
+    # first -- otherwise this would retry into the same wall three times
+    # instead of rotating to an account that still has quota.
+    text = "Usage limit reached. Please try again later."
+    assert ClaudeClient._looks_like_quota_error(text, None) is True
+
+
+def test_a_credit_refusal_is_not_a_blip():
+    from sandglass.claude_client import ClaudeClient
+
+    text = "API Error: 402 Insufficient Balance"
+    assert ClaudeClient._looks_like_credit_error(text) is True
+    assert ClaudeClient._looks_like_transient_error(text) is False
+
+
+def test_the_wordings_that_actually_dropped_a_run_are_recognised():
+    from sandglass.claude_client import ClaudeClient
+
+    for text in (
+        "Connection lost mid-response. The response above may be incomplete.",
+        "API Error: 529 overloaded_error",
+        "Error: read ECONNRESET",
+        "504 Gateway Timeout",
+        "fetch failed",
+    ):
+        assert ClaudeClient._looks_like_transient_error(text) is True, text
+
+
+def test_an_ordinary_failure_is_not_retried_forever():
+    from sandglass.claude_client import ClaudeClient
+
+    # A broken prompt does not get better by asking again, and must keep
+    # stopping the run so somebody looks at it.
+    assert ClaudeClient._looks_like_transient_error("SyntaxError in block 4") is False

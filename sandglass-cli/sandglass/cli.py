@@ -21,6 +21,8 @@ from .accounts import AccountPool, AccountsError
 from .claude_client import DEFAULT_PERMISSION_MODE, ClaudeClient
 from .execution_engine import (
     ACCOUNTING_SCHEMA,
+    DEFAULT_CONNECTION_RETRIES,
+    DEFAULT_CONNECTION_WAIT_SECONDS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     ON_REFUSAL_MODES,
     SESSION_MODE_CHAIN,
@@ -515,6 +517,23 @@ def execute(
             "'isolate' persists no session at all: every block a cold start."
         ),
     ),
+    connection_retries: int = typer.Option(
+        DEFAULT_CONNECTION_RETRIES,
+        "--connection-retries",
+        help=(
+            "How many times to retry a block whose connection dropped "
+            "mid-response (a reset socket, a 529 'overloaded', a gateway "
+            "timeout). 0 turns it off and a drop stops the run as it used to."
+        ),
+    ),
+    connection_wait: float = typer.Option(
+        DEFAULT_CONNECTION_WAIT_SECONDS,
+        "--connection-wait",
+        help=(
+            "Seconds to wait before each of those retries. Long enough for a "
+            "blip to pass, short enough not to lose the night."
+        ),
+    ),
     tiers: bool = typer.Option(
         True,
         "--tiers/--no-tiers",
@@ -709,6 +728,8 @@ def execute(
         provider_registry=registry,
         allow_external=external,
         tiers=tiers,
+        connection_retries=connection_retries,
+        connection_wait_seconds=connection_wait,
     )
     _accept_break_as_interrupt()
     try:

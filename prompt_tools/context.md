@@ -18,7 +18,7 @@ Open these only when this file isn't enough: `CLAUDE.md`/`AGENTS.md` (rules) ·
 through `claude -p` (Claude Code headless), so a night's work executes with no
 human present. Blocks live in `prompt_tools/future_prompts.md` separated by
 `====` lines and move to `prompt_history.md` when done. Package:
-`sandglass-cli/sandglass/`, version 0.10.0. Windows dev machine, PowerShell.
+`sandglass-cli/sandglass/`, version 0.11.1. Windows dev machine, PowerShell.
 
 ⚠️ **`CLAUDE.md`/`AGENTS.md` also carry rules for an unrelated ECSP/E-Drafter
 Flutter platform** — backend deploys, `flutter analyze`, API SPEC comments,
@@ -66,6 +66,12 @@ the work_log entry, the reading budget, `.sandglass/` ownership.
 
 ## Window — last 5 tasks, newest first
 
+### 2026-08-21 — Retry a block whose connection dropped
+A fourth error category (`TransientConnectionError`): quota needs another
+account, credit needs money, a real error needs a human — a reset socket needs
+none of those, just 5 min and the same request again, 3 times, per block.
+Classified *after* quota/credit so "try again later" stays a rate limit.
+
 ### 2026-08-21 — `sandglass ui`: the dashboard with working buttons
 A `file://` page cannot spawn a process, so buttons needed a server — foreground,
 dies with Ctrl-C, takes its child run with it. Run spawns `sandglass execute`
@@ -89,9 +95,3 @@ A static self-contained HTML file regenerated after each block, with
 `<meta http-equiv="refresh">`, instead of a local server. `phase:` reuses the
 existing front-matter mechanism; phase names are exact-match and
 case-sensitive, so `Phase 1` and `phase 1` count as two phases.
-
-### 2026-08-13 — Keep the queue moving when an external provider runs out of credit
-A metered key hits a zero balance, which waiting never fixes — so the run
-rotates to the next key for that vendor and falls back to Anthropic only when
-every one is spent. Credit state is per-run and deliberately never persisted.
-

@@ -582,6 +582,41 @@ If Claude Code doesn't report an exact refresh time, it falls back to
 checking every 15 minutes instead (`--poll-interval` to change that). See
 §13 if you'd rather get a push notification than watch the terminal.
 
+### When the connection drops mid-block
+
+Separate from a usage limit, and handled separately. Sometimes a block dies to
+the network rather than to anything real — the connection is lost part-way
+through a response, the API answers "overloaded", a gateway times out. You'll
+have seen it as:
+
+```
+Connection lost mid-response. The response above may be incomplete.
+```
+
+Nothing is actually wrong: the prompt is fine, your account is fine, your
+balance is fine — only the timing was wrong. So Sandglass now **waits 5 minutes
+and sends the same block again, up to 3 times**, picking up the conversation
+where the drop interrupted it rather than starting the block over from cold.
+Only if all three fail does the run stop and tell you.
+
+It stays quiet on your phone while it retries — this is the case that fixes
+itself, and a 3am buzz about something already being handled just teaches you to
+ignore the notifications that matter. If it gives up, that stop notifies as any
+other error does.
+
+To change it:
+
+```bash
+sandglass execute --connection-wait 600     # wait 10 minutes instead of 5
+sandglass execute --connection-retries 5    # try 5 times instead of 3
+sandglass execute --connection-retries 0    # off: a drop stops the run, as before
+```
+
+**Note:** this only covers genuine connection faults. A usage limit that happens
+to say "please try again later" is still treated as a usage limit — it waits for
+the window or switches account (above), rather than retrying three times into
+the same wall.
+
 As a safety net: if the *same* prompt fails the *same* way five times in a
 row without any progress, Sandglass stops trying and tells you to
 investigate — that pattern usually means something other than quota is
@@ -690,6 +725,8 @@ Sandglass is built so a bad run never loses your queue:
 | `sandglass execute --no-brief` | Don't inject the project-state brief; let each block read the full work log (see §12) |
 | `sandglass execute --session-mode MODE` | `chain` (default), `prompt`, or `isolate` — how much context blocks share (see §6) |
 | `sandglass execute --no-tiers` | Ignore `TIER:` markers in block text (see §4) |
+| `sandglass execute --connection-retries N` | Retries after a dropped connection (default 3; 0 = off, see §6) |
+| `sandglass execute --connection-wait SECONDS` | Wait before each of those retries (default 300 = 5 min) |
 | `sandglass accounts` | List pooled subscriptions and which have quota now (see §6) |
 | `sandglass accounts --probe` | Spend one tiny request per account to prove each token still works |
 | `sandglass accounts --disable NAME` | Park an account — every run skips it until you re-enable it (see §6) |

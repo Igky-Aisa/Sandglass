@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.11.1] - 2026-08-23
+
+### Added
+
+- **A dropped connection now waits and tries again instead of killing the night's queue.** Observed live: a run stopped on `Connection lost mid-response. The response above may be incomplete.` — a failure about the network, not about the prompt, the account or the balance, which nonetheless fell through to the generic error handler and stopped everything behind it. New `TransientConnectionError`, raised for connection resets, gateway timeouts, `fetch failed`, `ECONNRESET`, Anthropic's 529 `overloaded_error`, and the CLI's own "may be incomplete" wording. `_execute_with_rotation` answers it by waiting **5 minutes and re-sending the block unchanged, up to 3 times** (`--connection-wait`, `--connection-retries`; `--connection-retries 0` restores the old stop-on-drop behaviour). Five minutes because the thing being waited out clears in seconds to minutes — retrying instantly tends to hit the same bad moment, retrying in an hour wastes most of a night; three attempts because a fault surviving a quarter of an hour is no longer a blip and a human should see it. The budget is **per block, reset each time**: a blip on block 3 says nothing about block 4, and carrying the count forward would leave a long queue with no retries left when it finally needed one. The retry rejoins the interrupted session rather than starting cold, so it continues the work rather than redoing it. Classification runs **after** the quota and credit checks, never before — a rate limit worded "please try again later" is still a rate limit, and treating it as a blip would retry into the same wall three times instead of rotating to an account with quota left. Deliberately silent on ntfy: this is the case that resolves itself, and buzzing a phone at 3am about something already being handled is how people learn to ignore the notifications that matter — the exhausted-retries stop notifies through the normal error path.
+
 ## [0.11.0] - 2026-08-21
 
 ### Added

@@ -26,6 +26,7 @@ from .claude_client import (
     ClaudeClient,
     ProviderCreditExhaustedError,
     QuotaExceededError,
+    TransientConnectionError,
 )
 from .models import ExecutionResult, PromptObject, Response
 from .queue_manager import QueueManager
@@ -94,6 +95,17 @@ SESSION_MODES = (SESSION_MODE_CHAIN, SESSION_MODE_PROMPT, SESSION_MODE_ISOLATE)
 # working steadily for eight hours has a hot cache and should stay on it. It is
 # the gap that makes a session cold, not its age.
 CHAIN_MAX_AGE_SECONDS = 60 * 60
+
+# How a run answers a dropped connection: wait, then ask again, unchanged.
+#
+# Five minutes because the thing being waited out is a blip -- a reset socket,
+# a 529 while the API sheds load -- and those clear in seconds to minutes, not
+# hours. Retrying instantly tends to hit the same bad moment; retrying in an
+# hour wastes most of a night. Three attempts because a fault that survives
+# fifteen minutes is no longer a blip and a human should see it, rather than a
+# queue quietly grinding against it until morning.
+DEFAULT_CONNECTION_RETRIES = 3
+DEFAULT_CONNECTION_WAIT_SECONDS = 300
 
 # What to do when a block returns a response but changes no file.
 ON_REFUSAL_STOP = "stop"  # stop the run and let a human look (pre-0.11 behaviour)
@@ -407,9 +419,16 @@ class ExecutionEngine:
         provider_registry: "providers.ProviderRegistry | None" = None,
         allow_external: bool = True,
         tiers: bool = True,
+        connection_retries: int = DEFAULT_CONNECTION_RETRIES,
+        connection_wait_seconds: float = DEFAULT_CONNECTION_WAIT_SECONDS,
     ):
         self.queue_manager = queue_manager
         self.claude_client = claude_client
+        # Retries for a *transient* failure only -- see TransientConnectionError.
+        # Nothing else in the engine retries on a timer, deliberately: every
+        # other failure needs a different account, different money, or a human.
+        self.connection_retries = max(0, int(connection_retries))
+        self.connection_wait_seconds = max(0.0, float(connection_wait_seconds))
         self.storage = storage or queue_manager.storage
         # Several subscriptions the run may draw on, one at a time. None means
         # single-account mode: a quota hit waits for the window to refresh,
@@ -1047,7 +1066,11 @@ class ExecutionEngine:
         return max(remaining, 1.0)
 
     @staticmethod
-    async def _sleep_with_animation(total_seconds: float, resume_at: str | None) -> None:
+    async def _sleep_with_animation(
+        total_seconds: float,
+        resume_at: str | None,
+        reason: str = "for quota to refresh",
+    ) -> None:
         """Sleep out a quota wait behind a live ASCII hourglass animation.
 
         In a real terminal this redraws in place (`transient=True` clears it
@@ -1059,7 +1082,7 @@ class ExecutionEngine:
         """
         when = f" (expected around {resume_at})" if resume_at else ""
         console.print(
-            f"[yellow]Waiting {total_seconds / 60:.1f} min for quota to refresh{when}. "
+            f"[yellow]Waiting {total_seconds / 60:.1f} min {reason}{when}. "
             "Press Ctrl-C to stop (queue stays intact).[/yellow]"
         )
 
@@ -1223,9 +1246,56 @@ class ExecutionEngine:
         cache, which is per-account and starts cold. That costs one cache
         write on the receiving account and nothing after it.
         """
+        # Per-block budget, reset on every call: a network blip on block 3 says
+        # nothing about block 4, and carrying the count forward would leave a
+        # long queue with no retries left by the time it actually needed one.
+        drops = 0
+
         while True:
             try:
                 return await self.execute_prompt(prompt)
+            except TransientConnectionError as exc:
+                # The prompt is fine, the account is fine, the balance is fine.
+                # The only thing wrong was when it was asked.
+                drops += 1
+                if drops > self.connection_retries:
+                    console.print(
+                        f"  [red]✖ The connection dropped {drops} times "
+                        f"({self.connection_retries} retries used): {exc}[/red]"
+                    )
+                    logger.error(
+                        "Prompt %s exhausted %d connection retries: %s",
+                        prompt.id, self.connection_retries, exc,
+                    )
+                    # Let it surface as an ordinary error stop. Something is
+                    # wrong that outlasted a quarter of an hour, and pretending
+                    # otherwise would grind the queue against it until morning.
+                    raise
+                minutes = self.connection_wait_seconds / 60
+                console.print(
+                    f"  [yellow]↻ Connection lost ({exc}). Waiting "
+                    f"{minutes:.0f} min, then picking this block up again "
+                    f"(attempt {drops} of {self.connection_retries}).[/yellow]"
+                )
+                logger.warning(
+                    "Prompt %s: transient failure %d/%d, retrying in %.0fs: %s",
+                    prompt.id, drops, self.connection_retries,
+                    self.connection_wait_seconds, exc,
+                )
+                # Deliberately no push notification. This is the case that
+                # resolves itself, and buzzing a phone at 3am about something
+                # already being handled is how people learn to ignore the
+                # notifications that matter. The exhausted-retries stop above
+                # notifies through the normal error path.
+                await self._sleep_with_animation(
+                    self.connection_wait_seconds,
+                    None,
+                    reason="before trying this block again",
+                )
+                # `execute_prompt` re-reads the stored session, so the retry
+                # rejoins the conversation the drop interrupted rather than
+                # starting it cold.
+                continue
             except QuotaExceededError as exc:
                 if self.account_pool is None:
                     raise
