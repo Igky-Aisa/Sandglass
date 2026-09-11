@@ -216,6 +216,10 @@ class ProviderRegistry:
     # instead of the actively misleading "no key" -- and so re-enabling one
     # doesn't mean typing the key in again.
     parked: set[str] = field(default_factory=set)
+    # The providers file this registry was read from, so `refresh_parked` can
+    # go back to it mid-run. None means "assembled in memory" (tests), and a
+    # refresh is then a no-op rather than a read of somebody's real file.
+    source_path: "str | None" = None
     # Which key each provider is currently on, and the providers whose every
     # key has come back "no credit" during this run.
     _index: dict[str, int] = field(default_factory=dict)
@@ -310,7 +314,7 @@ class ProviderRegistry:
         if parked:
             logger.info("Providers parked (skipped until re-enabled): %s",
                         ", ".join(sorted(parked)))
-        return cls(keys=keys, parked=parked)
+        return cls(keys=keys, parked=parked, source_path=str(path))
 
     # --- Keys in use ------------------------------------------------------
 
@@ -335,6 +339,57 @@ class ProviderRegistry:
     def is_parked(self, name: str) -> bool:
         """True when this vendor is switched off in the providers file."""
         return (name or "").strip().lower() in self.parked
+
+    def refresh_parked(self) -> dict[str, bool]:
+        """Re-read the on/off flags from the providers file. Returns what changed.
+
+        The same reason the account pool has one: a run holds this registry for
+        hours, and parking a vendor is an instruction given during those hours.
+        Without it the switch only takes effect on the *next* run, which is not
+        what anyone means by pressing a button while watching a queue spend
+        money.
+
+        **Only the flags are re-read**, never the keys: rotating a credential
+        under a block that is already running is not what Park means, and this
+        process is the authority on which keys it has already drained.
+
+        Never raises -- the file is written by another process, so a read
+        landing mid-write leaves the flags as they were and the next block
+        tries again.
+        """
+        if not self.source_path:
+            return {}
+        path = Path(self.source_path)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not re-read %s for provider flags: %s", path, exc)
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+
+        entries = raw.get("providers") if isinstance(raw.get("providers"), dict) else raw
+        changed: dict[str, bool] = {}
+        for name in PROVIDERS:
+            if name not in entries:
+                continue
+            wanted = _entry_enabled(entries[name])
+            if wanted == (name in self.parked):
+                # `wanted` is "enabled"; `name in parked` is "off". Equal means
+                # the file and this registry disagree.
+                changed[name] = wanted
+                if wanted:
+                    self.parked.discard(name)
+                else:
+                    self.parked.add(name)
+        if changed:
+            logger.info(
+                "Provider flags changed on disk mid-run: %s",
+                ", ".join(
+                    f"{n} {'enabled' if on else 'parked'}" for n, on in changed.items()
+                ),
+            )
+        return changed
 
     def key_count(self, name: str) -> int:
         """How many keys are configured for ``name``, spent ones included."""

@@ -21,8 +21,9 @@ from rich.progress import (
 from rich.text import Text
 
 from . import dashboard, notify, project_docs, prompt_source, providers, run_report, workspace
-from .accounts import AccountPool
+from .accounts import AccountPool, AccountsError
 from .claude_client import (
+    AccountUnusableError,
     ClaudeClient,
     ProviderCreditExhaustedError,
     QuotaExceededError,
@@ -1264,6 +1265,88 @@ class ExecutionEngine:
         )
         return self.claude_client.model
 
+    def _honour_parking(self, prompt: PromptObject) -> None:
+        """Re-read the accounts file and get off an account parked mid-run.
+
+        Called once per block, because a block is the only moment where moving
+        is free: the credential is chosen when the request is sent, so switching
+        between blocks costs a cold prompt cache and switching during one costs
+        the block.
+
+        The whole point of the re-read is that the instruction arrives *during*
+        the run. A pool loaded at startup is a two-hour-old answer to "which
+        accounts may I use", and the operator pressing Park is telling this
+        process something it cannot learn any other way -- there is no signal
+        from the file, and the button has no way to reach a running queue.
+
+        Raises `AccountsError` when nothing usable is left *and no clock will
+        change that*, rather than falling into the quota wait: a pool whose
+        every account a human switched off will still be switched off in six
+        hours, and an all-night wait for that is worse than a clear stop.
+        """
+        # The same re-read on the other pool of credentials, so parking a
+        # vendor mid-run takes effect on the next block rather than the next
+        # run. Cheap: one small JSON read per block, and only when configured.
+        if self.provider_registry is not None:
+            for name, on in self.provider_registry.refresh_parked().items():
+                console.print(
+                    f"  [dim]Provider '{name}' was {'re-enabled' if on else 'parked'} "
+                    "while this run was going; honouring it from this block on.[/dim]"
+                )
+
+        pool = self.account_pool
+        if pool is None:
+            return
+        # A block heading for a third-party endpoint needs no Claude account at
+        # all, so the checks below must not stop it. Without this, a queue of
+        # entirely external blocks would refuse to start the moment every Claude
+        # account was parked -- which is a perfectly sensible way to run one.
+        if self._resolve_provider(prompt) is not None:
+            return
+        changed = pool.refresh_enabled()
+        for name, on in changed.items():
+            console.print(
+                f"  [dim]Account '{name}' was {'re-enabled' if on else 'parked'} "
+                "while this run was going; honouring it from this block on.[/dim]"
+            )
+
+        current = pool.current
+        if current is not None and current.enabled:
+            return
+
+        # The account in hand is the one that was just switched off. Note the
+        # name before advancing, because `advance()` moves `current`.
+        parked = current.name if current is not None else "the current account"
+        nxt = pool.advance()
+        if nxt is not None:
+            self.claude_client.auth_token = nxt.token
+            console.print(
+                f"  [yellow]↻ Account '{parked}' is parked — running this block "
+                f"on '{nxt.name}'.[/yellow]"
+            )
+            logger.info(
+                "Left parked account %s for %s on prompt %s", parked, nxt.name, prompt.id
+            )
+            return
+
+        if pool.all_parked():
+            raise AccountsError(
+                f"Every account in the pool is parked ('{parked}' was the last "
+                "one in use). Nothing will change on a clock, so this run is "
+                "stopping rather than waiting. Re-enable one with "
+                "`sandglass accounts --enable <name>`."
+            )
+
+        # Some accounts are still enabled, just spent: that IS a wait, and the
+        # existing quota path already knows how to sit one out.
+        raise QuotaExceededError(
+            f"Account '{parked}' is parked and every enabled account is out of "
+            "quota.",
+            rate_limit_info=(
+                {"resetsAt": pool.earliest_reset()} if pool.earliest_reset() else None
+            ),
+        )
+
     async def _execute_with_rotation(self, prompt: PromptObject) -> Response:
         """Run one block, moving to the next account when quota runs out.
 
@@ -1279,6 +1362,10 @@ class ExecutionEngine:
         cache, which is per-account and starts cold. That costs one cache
         write on the receiving account and nothing after it.
         """
+        # Before anything is sent: the accounts file may have been edited since
+        # the last block, and a parked account must not be used for this one.
+        self._honour_parking(prompt)
+
         # Per-block budget, reset on every call: a network blip on block 3 says
         # nothing about block 4, and carrying the count forward would leave a
         # long queue with no retries left by the time it actually needed one.
@@ -1329,6 +1416,63 @@ class ExecutionEngine:
                 # rejoins the conversation the drop interrupted rather than
                 # starting it cold.
                 continue
+            except AccountUnusableError as exc:
+                # Not a quota, not a balance, not the network: this account is
+                # shut. Waiting cannot open it and paying cannot either, so the
+                # only useful move is a different account -- which is exactly
+                # what the pool is for, and exactly what did NOT happen when a
+                # closed account ended a 20-block queue at 4:30am.
+                if self.account_pool is None:
+                    # Single-account mode has no second credential to try, so
+                    # this genuinely is the end of the run. Surfaced as-is: the
+                    # CLI's own wording already says what to do about it.
+                    raise
+                dead = self.account_pool.current_name
+                self.account_pool.mark_unusable(str(exc))
+                console.print(
+                    f"  [red]✖ Account '{dead}' cannot be used at all: "
+                    f"{exc}[/red]"
+                )
+                nxt = self.account_pool.advance()
+                if nxt is not None:
+                    self.claude_client.auth_token = nxt.token
+                    console.print(
+                        f"  [yellow]↻ Dropping '{dead}' for the rest of this run "
+                        f"and retrying this block on '{nxt.name}'.[/yellow]"
+                    )
+                    logger.info(
+                        "Account %s unusable; retrying prompt %s on %s",
+                        dead, prompt.id, nxt.name,
+                    )
+                    notify.send(
+                        f"'{dead}' is closed to Claude Code. Continuing on "
+                        f"'{nxt.name}'; park it with `sandglass accounts "
+                        f"--disable \"{dead}\"` to stop trying it.",
+                        title="Sandglass: account unusable",
+                    )
+                    continue
+
+                if self.account_pool.all_parked():
+                    raise AccountsError(
+                        f"Account '{dead}' cannot be used ({exc}), and every "
+                        "other account in the pool is parked or unusable. "
+                        "Nothing here comes back on a clock, so the run is "
+                        "stopping rather than waiting."
+                    ) from exc
+
+                # Others are merely spent, which IS a wait -- take the path
+                # that already exists for that rather than ending the night.
+                reset = self.account_pool.earliest_reset()
+                console.print(
+                    "  [yellow]…and every remaining account is out of quota — "
+                    "waiting for the first one to refresh.[/yellow]"
+                )
+                raise QuotaExceededError(
+                    f"Account '{dead}' is unusable ({exc}) and every other "
+                    "account is out of quota.",
+                    rate_limit_info={"resetsAt": reset} if reset else None,
+                    session_id=getattr(exc, "session_id", None),
+                ) from exc
             except QuotaExceededError as exc:
                 if self.account_pool is None:
                     raise
@@ -1413,6 +1557,14 @@ class ExecutionEngine:
                 # Reported as a quota hit precisely so the queue takes the path
                 # that already exists for that -- stop, record `waiting`, and
                 # sit out the hourglass until the first account refreshes.
+                if self.account_pool is not None and self.account_pool.all_parked():
+                    # Except when there is nothing to wait for: a pool that is
+                    # parked or shut does not refresh, so the hourglass would
+                    # run all night against a decision only a human can undo.
+                    raise AccountsError(
+                        f"{name} is out of credit and every Claude account is "
+                        "parked or unusable, so there is nothing to wait for."
+                    ) from exc
                 pool_reset = self.account_pool.earliest_reset() if self.account_pool else None
                 console.print(
                     "  [yellow]…and every Claude account is out of quota too — "
@@ -1906,6 +2058,7 @@ class ExecutionEngine:
             os.path.basename(project_dir),
             storage=self.storage,
             registry=self.provider_registry,
+            pool=self.account_pool,
         )
 
         milestone = (pct // 5) * 5
@@ -2043,6 +2196,18 @@ class ExecutionEngine:
                 f"  ↗ {len(external)} block(s) ran on {vendors} "
                 f"({ext_tokens:,} tokens) — their share of the cost above is "
                 "estimated at Anthropic rates, not billed by Anthropic."
+            )
+        dropped = self.account_pool.unusable() if self.account_pool else []
+        for name, reason in dropped:
+            # Named at the end as well as at the moment it happened: the moment
+            # scrolled past hours ago, and an account silently missing from the
+            # rotation is how a pool quietly becomes a single account.
+            console.print(
+                f"  ⚠ Account '{name}' was dropped from this run: {reason}"
+            )
+            console.print(
+                f"    [dim]Park it so runs stop trying: [cyan]sandglass accounts "
+                f'--disable "{name}"[/cyan][/dim]'
             )
         if results:
             console.print("  what has been done:")

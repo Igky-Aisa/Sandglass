@@ -303,12 +303,18 @@ def _live_script(key: str) -> str:
     )
 
 
-def _accounts_card(storage: StorageService, live: bool = False) -> str:
+def _accounts_card(storage: StorageService, live: bool = False, pool=None) -> str:
     """Render the pooled subscriptions and which of them a run may use now.
 
     Omitted entirely when there is no accounts file, which is the normal case
     for a single-subscription machine -- an empty card would just be a question
     mark on every dashboard that will never have an answer.
+
+    ``pool`` is the run's live `AccountPool` when a run is what is calling.
+    Passing it is the only way the page can show an account the run has
+    *dropped* -- an org that switched Claude Code off, a revoked token -- since
+    that state is per-run and deliberately never written to disk. Exactly the
+    same arrangement as `registry` on the providers card, for the same reason.
 
     **Only names and states are read.** `Account.__repr__` keeps tokens out of
     logs for the same reason this keeps them out of the page: `dashboard.html`
@@ -318,11 +324,12 @@ def _accounts_card(storage: StorageService, live: bool = False) -> str:
     try:
         from .accounts import AccountPool
 
-        pool = AccountPool.load()
         if pool is None:
-            return ""
-        pool.state_path = storage.accounts_state_path
-        pool.load_state()
+            pool = AccountPool.load()
+            if pool is None:
+                return ""
+            pool.state_path = storage.accounts_state_path
+            pool.load_state()
         accounts = list(pool.accounts)
     except Exception as exc:  # noqa: BLE001 - see below
         # Deliberately broad. This runs after every completed block in an
@@ -340,6 +347,10 @@ def _accounts_card(storage: StorageService, live: bool = False) -> str:
     for account in accounts:
         if not account.enabled:
             color, label = _IDLE_COLOR, "disabled"
+        elif account.unusable_reason:
+            # Only ever true mid-run, and never persisted: the account refused
+            # outright, so this says what happened rather than offering a time.
+            color, label = _RED, "dropped this run — the account refused"
         elif account.is_available():
             color, label = _GREEN, "quota available"
             usable += 1
@@ -487,6 +498,7 @@ def generate(
     storage: StorageService | None = None,
     live_key: str | None = None,
     registry=None,
+    pool=None,
 ) -> str:
     """Render the dashboard as a self-contained HTML string.
 
@@ -525,7 +537,7 @@ def generate(
 
     live = bool(live_key)
     phases_section = _phase_rows(phases)
-    accounts_section = _accounts_card(storage, live=live)
+    accounts_section = _accounts_card(storage, live=live, pool=pool)
     providers_section = _providers_card(registry, live=live)
     control_section = _control_bar(live)
     # A served page refreshes itself from JavaScript, which can leave the log
@@ -784,6 +796,7 @@ def write(
     title: str,
     storage: StorageService | None = None,
     registry=None,
+    pool=None,
 ) -> str:
     """Generate and save the dashboard, returning the path written to.
 
@@ -794,7 +807,9 @@ def write(
     storage = storage or StorageService()
     storage.ensure_sandglass_dir()
     path = os.path.join(storage.base_path, DASHBOARD_FILENAME)
-    html_text = generate(source_file, title, storage=storage, registry=registry)
+    html_text = generate(
+        source_file, title, storage=storage, registry=registry, pool=pool
+    )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(html_text)
     return path

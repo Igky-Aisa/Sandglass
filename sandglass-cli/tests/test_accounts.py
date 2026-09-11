@@ -23,7 +23,7 @@ from sandglass.accounts import (
     AccountsError,
     subprocess_env,
 )
-from sandglass.claude_client import QuotaExceededError
+from sandglass.claude_client import AccountUnusableError, QuotaExceededError
 from sandglass.execution_engine import ExecutionEngine
 from sandglass.models import PromptObject, Response
 
@@ -69,6 +69,10 @@ def _engine(pool, client) -> ExecutionEngine:
     engine = ExecutionEngine.__new__(ExecutionEngine)
     engine.account_pool = pool
     engine.claude_client = client
+    # Hand-built rather than constructed, so the few attributes the rotation
+    # path touches have to be set explicitly. No external providers here: these
+    # tests are about Claude accounts.
+    engine.provider_registry = None
     if pool is not None and pool.current is not None:
         client.auth_token = pool.current.token
     engine.execute_prompt = lambda prompt: client.send()  # type: ignore[assignment]
@@ -470,3 +474,211 @@ def test_set_enabled_rejects_an_unknown_name(tmp_path):
     with pytest.raises(AccountsError) as exc:
         set_enabled("typo", False, path)
     assert "typo" in str(exc.value) and "Known: a" in str(exc.value)
+
+
+# --- Parking an account while the run is going ----------------------------
+#
+# The pool is read once, at startup, and then lived in for hours. Parking is an
+# instruction given during exactly those hours, so a pool that never looks at
+# the file again makes the button decorative -- which is what happened live on
+# 2026-09-11: a run that began at 02:24 rotated onto an account parked at 02:25,
+# two hours later.
+
+
+class _ParkingClient:
+    """Quota-fails a fixed number of times, recording the credential each time."""
+
+    def __init__(self, fail_times: int, park=None):
+        self.fail_times = fail_times
+        self.auth_token = None
+        self.model = "m"
+        self.effort = None
+        self.tokens_seen: list = []
+        # Called before each attempt, so a test can change the accounts file
+        # mid-run exactly as a human pressing Park would.
+        self.park = park
+
+    async def send(self) -> Response:
+        if self.park is not None:
+            self.park()
+        self.tokens_seen.append(self.auth_token)
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise QuotaExceededError("usage limit reached")
+        return Response(
+            prompt_id="1", text="done", tokens_used=100, model="m", cost_usd=0.5
+        )
+
+
+def _set_enabled_in_file(path, name: str, enabled: bool) -> None:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for entry in raw["accounts"]:
+        if entry["name"] == name:
+            entry["enabled"] = enabled
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_refresh_enabled_picks_up_a_park_written_after_load(tmp_path):
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    path = tmp_path / "accounts.json"
+
+    _set_enabled_in_file(path, "b", False)
+    assert pool.accounts[1].enabled is True, "still the startup answer"
+
+    assert pool.refresh_enabled() == {"b": False}
+    assert pool.accounts[1].enabled is False
+    # Idempotent: nothing "changed" the second time.
+    assert pool.refresh_enabled() == {}
+
+
+def test_refresh_enabled_touches_nothing_but_the_flag(tmp_path):
+    """Tokens and exhaustion are deliberately not re-read: swapping a
+    credential under a half-finished block is not what Park means, and this
+    process -- not the file -- is the authority on what is spent."""
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    path = tmp_path / "accounts.json"
+    pool.accounts[0].exhausted_until = time.time() + 3600
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["accounts"][0]["token"] = "tok-rotated-elsewhere"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    pool.refresh_enabled()
+    assert pool.accounts[0].token == "tok-a"
+    assert pool.accounts[0].exhausted_until is not None
+
+
+def test_refresh_enabled_survives_an_unreadable_file(tmp_path):
+    """The file is written by another process; a read landing mid-write must
+    cost the run nothing."""
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    (tmp_path / "accounts.json").write_text("{ half a fi", encoding="utf-8")
+
+    assert pool.refresh_enabled() == {}
+    assert [a.enabled for a in pool.accounts] == [True, True]
+
+
+def test_rotation_never_lands_on_an_account_parked_mid_run(tmp_path):
+    pool = _write_pool(tmp_path, names=("a", "b", "c"))
+    path = tmp_path / "accounts.json"
+    # Parked after the pool was loaded -- the whole point.
+    _set_enabled_in_file(path, "b", False)
+
+    client = _ParkingClient(fail_times=1)
+    response = asyncio.run(_engine(pool, client)._execute_with_rotation(PROMPT))
+
+    assert response.text == "done"
+    assert client.tokens_seen == ["tok-a", "tok-c"], "b was parked and must be skipped"
+
+
+def test_a_block_leaves_an_account_parked_while_it_was_in_use(tmp_path):
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    path = tmp_path / "accounts.json"
+    _set_enabled_in_file(path, "a", False)
+
+    client = _ParkingClient(fail_times=0)
+    asyncio.run(_engine(pool, client)._execute_with_rotation(PROMPT))
+
+    # The block ran on 'b': the current account was parked before it started,
+    # and the per-block check moved off it rather than using it one last time.
+    assert client.tokens_seen == ["tok-b"]
+    assert pool.current_name == "b"
+
+
+def test_parking_everything_stops_the_run_instead_of_waiting_forever(tmp_path):
+    """A pool whose every account a human switched off will still be switched
+    off in six hours. `earliest_reset` has nothing to offer, so the quota wait
+    would poll all night for a change that is never coming."""
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    path = tmp_path / "accounts.json"
+    _set_enabled_in_file(path, "a", False)
+    _set_enabled_in_file(path, "b", False)
+
+    client = _ParkingClient(fail_times=0)
+    with pytest.raises(AccountsError) as exc:
+        asyncio.run(_engine(pool, client)._execute_with_rotation(PROMPT))
+    assert "parked" in str(exc.value)
+
+
+# --- An account that is shut, not merely spent ----------------------------
+
+
+class _ClosedAccountClient:
+    """Refuses under `dead_token` the way a closed subscription does."""
+
+    def __init__(self, dead_tokens):
+        self.dead_tokens = set(dead_tokens)
+        self.auth_token = None
+        self.model = "m"
+        self.effort = None
+        self.tokens_seen: list = []
+
+    async def send(self) -> Response:
+        self.tokens_seen.append(self.auth_token)
+        if self.auth_token in self.dead_tokens:
+            raise AccountUnusableError(
+                "Your organization has disabled Claude subscription access for "
+                "Claude Code · Use an Anthropic API key instead"
+            )
+        return Response(
+            prompt_id="1", text="done", tokens_used=100, model="m", cost_usd=0.5
+        )
+
+
+def test_a_closed_account_rotates_instead_of_ending_the_queue(tmp_path):
+    """Live incident: one closed account ended a 20-block queue at 4:30am with
+    two healthy accounts sitting unused beside it."""
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    client = _ClosedAccountClient(dead_tokens=["tok-a"])
+
+    response = asyncio.run(_engine(pool, client)._execute_with_rotation(PROMPT))
+
+    assert response.text == "done"
+    assert client.tokens_seen == ["tok-a", "tok-b"]
+    names = [name for name, _ in pool.unusable()]
+    assert names == ["a"]
+    assert "organization has disabled" in pool.accounts[0].unusable_reason
+
+
+def test_a_closed_account_is_not_tried_again_by_a_later_block(tmp_path):
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    client = _ClosedAccountClient(dead_tokens=["tok-a"])
+    engine = _engine(pool, client)
+
+    asyncio.run(engine._execute_with_rotation(PROMPT))
+    asyncio.run(engine._execute_with_rotation(PROMPT))
+
+    # 'a' refused once and was dropped for the run; the second block never
+    # touches it. Re-probing a shut account costs a real request every block.
+    assert client.tokens_seen == ["tok-a", "tok-b", "tok-b"]
+
+
+def test_a_closed_account_is_never_written_into_the_accounts_file(tmp_path):
+    """The fix for a closed account is a human re-opening it or parking it on
+    purpose. A run editing somebody's configuration on the strength of one
+    error string is a bigger decision than it looks."""
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    client = _ClosedAccountClient(dead_tokens=["tok-a"])
+
+    asyncio.run(_engine(pool, client)._execute_with_rotation(PROMPT))
+
+    raw = json.loads((tmp_path / "accounts.json").read_text(encoding="utf-8"))
+    assert all(e.get("enabled") is not False for e in raw["accounts"])
+
+
+def test_every_account_closed_stops_rather_than_waiting(tmp_path):
+    pool = _write_pool(tmp_path, names=("a", "b"))
+    client = _ClosedAccountClient(dead_tokens=["tok-a", "tok-b"])
+
+    with pytest.raises(AccountsError):
+        asyncio.run(_engine(pool, client)._execute_with_rotation(PROMPT))
+    assert len(pool.unusable()) == 2
+
+
+def test_a_single_account_run_still_surfaces_the_refusal(tmp_path):
+    """No pool means no second credential to try, so this really is the end of
+    the run -- and the CLI's own wording already says what to do about it."""
+    client = _ClosedAccountClient(dead_tokens=[None])
+
+    with pytest.raises(AccountUnusableError):
+        asyncio.run(_engine(None, client)._execute_with_rotation(PROMPT))

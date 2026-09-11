@@ -2,6 +2,24 @@
 
 > Older entries live in `master_plan/archive/work_log_archive_2026-08-23.md`. This file keeps the most recent 5 so reading it stays cheap; consult the archive only when you need history older than that.
 
+## 2026-09-11 - Opus 5 - Park reached the file but never the running queue
+
+### 1. Context Snapshot
+- **Goal**: Parking an account mid-run did nothing, and the closed account it should have avoided then killed a 20-block queue.
+- **State**: `sandglass/accounts.py` (`refresh_enabled`, `mark_unusable`), `providers.py` (`refresh_parked`), `claude_client.py` (`AccountUnusableError`), `execution_engine.py` (`_honour_parking`).
+- **Previous Blocker**: None. The button was writing the file correctly all along.
+
+### 2. Work Done
+- **The button was never broken; the reader was.** `AccountPool` is loaded once in `ExecutionEngine.__init__` and lived in for hours, so a flag written at 02:25 could not reach a run started at 02:24. Proven from the timestamps: `accounts.json` mtime 02:25:22, `last_run.json` `started_at` 02:24:52, rotation onto the parked account at 04:30. Anything that only re-reads at startup is a button that works tomorrow.
+- **`advance()` refreshes first** — one choke point every rotation passes through, so no future caller can forget. The per-block `_honour_parking` covers the other half: an account parked *while in use*. Mid-block switching was deliberately not attempted; it throws away the block's work.
+- **Only `enabled` is re-read.** Tokens would mean rotating a credential under a running block; exhaustion would mean the file overruling the process that actually discovered it. Both are the kind of "while we're here" that turns a small fix into an incident.
+- **Parked-everything stops, spent-everything waits.** `all_parked()` exists to keep those apart — `earliest_reset()` returns None for a parked pool, and the quota path would have polled all night for a change nobody was going to make.
+- **`AccountUnusableError`**: an org-disabled / revoked / closed account is neither quota (no clock) nor transient (retrying buys the same refusal). Dropped in memory for the run only — writing `enabled: false` into the user's accounts file on the strength of one error string is a bigger decision than it looks — then named in the summary with the command to park it permanently.
+
+### 3. Next Steps (For the next agent)
+- `_ACCOUNT_UNUSABLE_MARKERS` is string-matched against the CLI's one-line error, like every other classifier here. If Anthropic rewords the org-disabled message, the queue goes back to stopping. Worth re-checking against a live refusal.
+- The accounts file is re-read once per block; a long block means a park waits for it. If that ever matters, the next step is checking between the retry attempts inside a block, not mid-request.
+
 ## 2026-09-11 - Opus 5 - A CLINE: STOP sliced by the scan window re-opened the money-path leak
 
 ### 1. Context Snapshot

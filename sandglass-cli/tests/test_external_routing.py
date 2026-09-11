@@ -9,6 +9,7 @@ disclose code if they are wrong.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -395,3 +396,37 @@ def test_a_long_wait_gives_the_vendor_another_chance(qm, monkeypatch):
     asyncio.run(engine.run_with_auto_resume())
 
     assert registry.key_for("deepseek") == _FIRST_KEY
+
+
+def test_an_external_block_runs_even_with_every_account_parked(qm, tmp_path):
+    """Parking every Claude account is a sensible way to run an all-external
+    queue, so the per-block account check must not stop one. The block needs no
+    Claude credential at all -- refusing it would be Sandglass enforcing a
+    requirement the work does not have."""
+    from sandglass.accounts import AccountPool
+
+    accounts = tmp_path / "accounts.json"
+    accounts.write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {"name": "a", "token": "tok-a", "enabled": True},
+                    {"name": "b", "token": "tok-b", "enabled": True},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    pool = AccountPool.load(accounts)
+    qm.add_prompt(text="**CLINE: pro**\n\nCheap external task.")
+
+    # Parked after load, exactly as pressing Park mid-run does.
+    raw = json.loads(accounts.read_text(encoding="utf-8"))
+    for entry in raw["accounts"]:
+        entry["enabled"] = False
+    accounts.write_text(json.dumps(raw), encoding="utf-8")
+
+    client = _RecordingClient()
+    asyncio.run(_engine(qm, client, account_pool=pool).execute_queue())
+
+    assert client.calls[0]["provider"][0].name == "deepseek"

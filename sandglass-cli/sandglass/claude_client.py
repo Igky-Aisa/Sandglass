@@ -64,6 +64,33 @@ _CREDIT_ERROR_MARKERS = (
 )
 
 
+# Refusals that are about THIS ACCOUNT being unusable, rather than about its
+# quota, its balance, or the network. An org that has turned off Claude Code
+# access, a revoked or expired token, an account that is closed: none of these
+# come back on a clock, and none of them says anything about the other accounts
+# in the pool.
+#
+# Found live (Azymetrix, 2026-09-11): an account the operator had closed
+# answered `Your organization has disabled Claude subscription access for
+# Claude Code`, which matched no marker here, fell through to a plain
+# RuntimeError, and ended a queue with 20 blocks still in it -- at 04:30, with
+# two perfectly healthy accounts sitting next to it in the pool.
+#
+# Matched on wording for the same reason every other classifier here is: the
+# CLI hands Sandglass one line of text and no status code.
+_ACCOUNT_UNUSABLE_MARKERS = (
+    "organization has disabled",
+    "subscription access for claude code",
+    "use an anthropic api key instead",
+    "oauth token has expired",
+    "oauth token is invalid",
+    "token has been revoked",
+    "account has been deactivated",
+    "account is suspended",
+    "no longer has access",
+)
+
+
 # Refusals that are about the network or the far end being briefly unwell,
 # rather than about this prompt, this account, or this balance. Matched on
 # wording for the same reason the credit markers are: the error reaches
@@ -176,6 +203,24 @@ class ProviderCreditExhaustedError(RuntimeError):
         # Same reason QuotaExceededError carries one: the refusal interrupts
         # work that was never done, and the retry (on another key, or on
         # Claude) should continue the conversation rather than start cold.
+        self.session_id = session_id
+
+
+class AccountUnusableError(RuntimeError):
+    """Raised when an account cannot be used at all -- not now, not in an hour.
+
+    Deliberately distinct from :class:`QuotaExceededError`, which is a clock,
+    and from a plain ``RuntimeError``, which stops the run for a human to look
+    at. An org that has switched Claude Code off, a revoked token, a closed
+    account: the response is to take that one account out of this run and carry
+    on with the others, and to stop only when there is no other.
+
+    Before this existed, one closed account ended a 20-block queue at 4:30am
+    while two healthy accounts sat unused beside it in the pool.
+    """
+
+    def __init__(self, message: str, session_id: Optional[str] = None):
+        super().__init__(message)
         self.session_id = session_id
 
 
@@ -471,6 +516,15 @@ class ClaudeClient:
                     rate_limit_info=rate_limit_info,
                     session_id=observed_session_id or resume_session_id,
                 )
+            if self._looks_like_account_unusable(error_text):
+                # Checked before the transient markers: "use an API key
+                # instead" is advice, not a blip, and retrying it three times
+                # on a five-minute timer would waste a quarter of an hour to
+                # arrive at the same refusal.
+                raise AccountUnusableError(
+                    error_text,
+                    session_id=observed_session_id or resume_session_id,
+                )
             if self._looks_like_transient_error(error_text):
                 # Checked after quota and credit, never before: those two also
                 # arrive as plain strings, and a rate limit that happened to
@@ -585,6 +639,18 @@ class ClaudeClient:
         return "402" in lowered and any(
             word in lowered for word in ("balance", "credit", "payment", "fund")
         )
+
+    @staticmethod
+    def _looks_like_account_unusable(text: str) -> bool:
+        """Whether this refusal means "not this account", ever.
+
+        Only consulted after quota and credit have said no, so a rate limit
+        worded unhelpfully stays a rate limit. What separates this from both is
+        that no amount of waiting or paying fixes it -- the account itself is
+        shut, so the only useful move is a different one.
+        """
+        lowered = (text or "").lower()
+        return any(marker in lowered for marker in _ACCOUNT_UNUSABLE_MARKERS)
 
     @staticmethod
     def _looks_like_transient_error(text: str) -> bool:

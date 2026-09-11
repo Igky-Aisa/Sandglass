@@ -82,6 +82,15 @@ class Account:
     # (see `set_enabled`), because "skip this one until I say otherwise" has to
     # survive the run that was told it.
     enabled: bool = True
+    # Why this account cannot be used for the rest of THIS run -- an org that
+    # has switched Claude Code off, a revoked token, a closed account. Distinct
+    # from both fields above: `exhausted_until` expires on a clock and
+    # `enabled` is a human's standing decision, whereas this is the account
+    # itself refusing, discovered by trying. Deliberately **not** persisted:
+    # the fix is a human re-opening the account or parking it on purpose, and
+    # a run that wrote it to the accounts file would be editing somebody's
+    # configuration on the strength of one error string.
+    unusable_reason: Optional[str] = None
     # Per-run accounting, reported at the end so a rotated run can be read as
     # "what did each account actually do" rather than one merged total.
     blocks: int = 0
@@ -89,7 +98,7 @@ class Account:
     cost_usd: float = 0.0
 
     def is_available(self, now: Optional[float] = None) -> bool:
-        if not self.enabled:
+        if not self.enabled or self.unusable_reason:
             return False
         if self.exhausted_until is None:
             return True
@@ -100,6 +109,8 @@ class Account:
         # locals dump. The default dataclass repr would print it in all three.
         if not self.enabled:
             state = "disabled"
+        elif self.unusable_reason:
+            state = "unusable"
         else:
             state = "available" if self.is_available() else "exhausted"
         return f"<Account {self.name!r} {state}>"
@@ -117,6 +128,10 @@ class AccountPool:
     # Where exhaustion timestamps persist between runs. Set by the engine from
     # StorageService; None keeps the pool purely in-memory (used by tests).
     state_path: Optional[str] = None
+    # The accounts file this pool was read from, so `refresh_enabled` can go
+    # back to the same one. None means "assembled in memory" (tests, mostly),
+    # and refreshing is then a no-op rather than a read of somebody's real file.
+    source_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.accounts and not self.history:
@@ -252,7 +267,7 @@ class AccountPool:
             len(accounts), path,
             f" ({len(disabled)} disabled: {', '.join(disabled)})" if disabled else "",
         )
-        return cls(accounts=accounts, index=index)
+        return cls(accounts=accounts, index=index, source_path=str(path))
 
     # --- Current account -------------------------------------------------
 
@@ -283,6 +298,92 @@ class AccountPool:
         )
         self.save_state()
 
+    def refresh_enabled(self) -> dict[str, bool]:
+        """Re-read the on/off flags from the accounts file. Returns what changed.
+
+        **A run holds its pool in memory for hours, and parking an account is
+        an instruction given during exactly those hours.** Without this, the
+        file the button writes is read once at startup and never again: a run
+        that began at 02:24 rotated onto an account parked at 02:25 two hours
+        later, because the process it had to convince was already asleep.
+        Observed live (Azymetrix, 2026-09-11) — the account then refused the
+        request outright and ended the run.
+
+        Deliberately narrow: **only `enabled` is re-read.** Tokens are not
+        re-read, because swapping a credential under a half-finished block is a
+        change nobody asked for by clicking Park; exhaustion is not re-read,
+        because this process is the authority on that and the file is not.
+        Accounts that appear in the file but not in this pool are ignored with
+        a note — adding one mid-run is a bigger decision than a toggle, and the
+        next run picks it up anyway.
+
+        Never raises. The file is written by another process (the CLI or the
+        control panel), so a read landing mid-write must cost this run nothing:
+        the flags simply stay as they were and the next block tries again.
+        """
+        if not self.source_path:
+            return {}
+        path = Path(self.source_path)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not re-read %s for account flags: %s", path, exc)
+            return {}
+
+        entries = raw.get("accounts") if isinstance(raw, dict) else raw
+        if not isinstance(entries, list):
+            logger.warning("%s has no 'accounts' list; keeping the flags in memory.", path)
+            return {}
+
+        by_name = {a.name: a for a in self.accounts}
+        changed: dict[str, bool] = {}
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or f"account-{i + 1}")
+            account = by_name.get(name)
+            if account is None:
+                logger.info(
+                    "%s now lists account %r, which this run did not start with; "
+                    "it will be available to the next run.", path, name,
+                )
+                continue
+            wanted = _entry_enabled(entry)
+            if wanted != account.enabled:
+                account.enabled = wanted
+                changed[name] = wanted
+        if changed:
+            logger.info(
+                "Account flags changed on disk mid-run: %s",
+                ", ".join(
+                    f"{n} {'enabled' if on else 'parked'}" for n, on in changed.items()
+                ),
+            )
+        return changed
+
+    def mark_unusable(self, reason: str) -> Optional[Account]:
+        """Take the account in use out of this run, and say which it was.
+
+        For a refusal that is about the account rather than its quota: an org
+        that has disabled Claude Code, a revoked token, a closed subscription.
+        Nothing about it comes back on a clock, so `exhausted_until` would be a
+        lie that makes the engine wait for it; nothing about it is the
+        operator's standing decision either, so writing `enabled: false` into
+        their accounts file would be this run editing their configuration over
+        one error string. It lives in memory, for this run, and the end-of-run
+        report names it so the human can decide what to do about it.
+        """
+        account = self.current
+        if account is None:
+            return None
+        account.unusable_reason = reason
+        logger.warning("Account %s is unusable for this run: %s", account.name, reason)
+        return account
+
+    def unusable(self) -> list[tuple[str, str]]:
+        """`(name, reason)` for every account this run had to give up on."""
+        return [(a.name, a.unusable_reason) for a in self.accounts if a.unusable_reason]
+
     def advance(self) -> Optional[Account]:
         """Move to the next account with quota left, if there is one.
 
@@ -290,7 +391,12 @@ class AccountPool:
         order and each is drained before the next is touched -- one account
         deeply cached beats several shallowly cached, since a switch costs a
         cold prompt cache on the receiving account.
+
+        Re-reads the on/off flags first, because this is the one choke point
+        every rotation goes through: whatever else forgets to ask, a run can
+        never move onto an account that was parked while it was running.
         """
+        self.refresh_enabled()
         now = time.time()
         for offset in range(1, len(self.accounts) + 1):
             candidate = (self.index + offset) % len(self.accounts)
@@ -299,6 +405,18 @@ class AccountPool:
                 self.history.append(self.accounts[candidate].name)
                 return self.accounts[candidate]
         return None
+
+    def all_parked(self) -> bool:
+        """True when nothing is usable and waiting cannot change that.
+
+        The distinction the engine needs: an exhausted pool comes back on a
+        clock and is worth waiting out, whereas a pool whose every account a
+        human has switched off will still be switched off in six hours. Waiting
+        on that is an all-night no-op nobody is watching.
+        """
+        return not any(a.is_available() for a in self.accounts) and not any(
+            a.enabled and not a.unusable_reason for a in self.accounts
+        )
 
     def earliest_reset(self) -> Optional[float]:
         """When the first exhausted account comes back, in epoch seconds.
@@ -310,7 +428,7 @@ class AccountPool:
         times = [
             a.exhausted_until
             for a in self.accounts
-            if a.exhausted_until and a.enabled
+            if a.exhausted_until and a.enabled and not a.unusable_reason
         ]
         return min(times) if times else None
 

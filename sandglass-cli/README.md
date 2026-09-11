@@ -733,6 +733,22 @@ probed by `--probe` (a probe costs real tokens on the account being probed), and
 is excluded from the "what comes back first" calculation — otherwise a run would
 wake itself up for an account it is not allowed to touch.
 
+**It takes effect on a run that is already going.** The pool re-reads the flags
+before every block and before every rotation, so parking an account mid-run
+moves the next block off it — the whole point of the button being there while
+you watch a queue. Only the flags are re-read: not tokens (swapping a credential
+under a half-finished block isn't what Park means) and not exhaustion (the run
+knows that, the file doesn't). Park every account and the run **stops** with a
+clear message rather than waiting: nothing a human switched off comes back on a
+clock. The same applies to `sandglass providers park`.
+
+**An account that is shut, rather than spent, is dropped rather than fatal.** An
+org that has disabled Claude Code, a revoked token, a closed subscription: the
+run takes that account out for the rest of the night, retries the block on the
+next one, and names it in the summary with the command to park it for good. It
+is never written into your accounts file — re-opening or parking it is your
+call, not a run's.
+
 The flag lives in `accounts.json` itself, not in `.sandglass/`, because
 exhaustion and disabled are different facts: exhaustion expires on a clock, and
 "skip this one until I say otherwise" must not. Sandglass refuses to disable the

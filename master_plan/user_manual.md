@@ -694,6 +694,19 @@ Both commands print the pool straight afterwards, so you can see the result
 without running a second command. A parked account shows as `○ disabled`, and
 `sandglass accounts --probe` skips it rather than spending tokens on it.
 
+**It works on a run that is already going.** Sandglass checks the file before
+every block, so parking an account while a queue is running moves the next block
+off it — you don't have to stop the run. The block in flight finishes on the old
+account (switching mid-block would throw that block's work away). If you park
+*every* account, the run stops and says so instead of waiting all night for
+something that will never change.
+
+**If an account is closed or blocked** — you cancelled it, or the message reads
+*"Your organization has disabled Claude subscription access for Claude Code"* —
+the run no longer dies on it. It drops that account for the rest of the night,
+retries the block on the next account, and tells you at the end which one it
+gave up on and how to park it. Your accounts file is never edited for you.
+
 **When not to use it:** not for an account that is merely out of quota *today*.
 Sandglass already tracks that on its own and brings the account back the moment
 its window refreshes, whereas disabling is a standing decision that nothing but
