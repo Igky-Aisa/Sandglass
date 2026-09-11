@@ -2,6 +2,23 @@
 
 > Older entries live in `master_plan/archive/work_log_archive_2026-08-23.md`. This file keeps the most recent 5 so reading it stays cheap; consult the archive only when you need history older than that.
 
+## 2026-09-11 - Opus 5 - A CLINE: STOP sliced by the scan window re-opened the money-path leak
+
+### 1. Context Snapshot
+- **Goal**: Explain why Azymetrix's P19.03 — `**CLINE: STOP** ... Never external` — was dispatched to DeepSeek, and close it.
+- **State**: `sandglass/queue_manager.py` (`_marker_match`, `refuses_external`), `providers.py` (`known_model`), `execution_engine.py` (`_resolve_provider`), `cli.py` (lint).
+- **Previous Blocker**: Resolved. 0.10.0's negation list was correct and was never consulted.
+
+### 2. Work Done
+- **Root cause: the 300-char window sliced the marker, not the block.** `_external_defaults` matched against `text[:300]`; P19.03's `**CLINE: STOP**` begins at character 290, so the regex saw `**CLINE: STO`. A half-read marker is not a non-match — it is a *different value*, and `STO` missed `_CLINE_NEGATIONS` by one letter, then sailed through `resolve_model`'s pass-anything-through. The window now bounds where a marker may **start** (`_marker_match`); `TIER:` had the same latent bug, silently dropping the tier.
+- **Measured, not assumed**: of 37 externally-routed completions in Azymetrix's `.sandglass/history.json`, 14 were blocks that forbid it — 11 dated 2026-08-14/15 (before the negation list existed, any marker position) and exactly three after it, at chars 290/292/292. Only boundary-straddling blocks leaked post-0.10.0, which is the signature that identified the cause.
+- **Fail closed on unknown values** (`Provider.known_model`): a tier, a listed model, or a vendor prefix routes; anything else warns and stays on Anthropic. `resolve_model` stays permissive because it runs *after* the decision — that split is the point.
+- **`refuses_external` is checked at parse, run and lint time**, and outranks `provider:` front matter and a vendor-prefixed `model:`. Run-time is what makes it retroactive: `queue.json` stores the provider decided at import, so a queue captured by the old parser would otherwise still route. Azymetrix's queue is empty, so nothing there needs re-importing.
+
+### 3. Next Steps (For the next agent)
+- The 11 pre-0.10.0 leaks are history, not a live defect — but Azymetrix ran money-path blocks (P7.x duplicate-order prevention, compensation/unwind, the Binance two-step gap) on DeepSeek on 2026-08-14/15. Worth an audit *there*, not here, of what those blocks wrote.
+- `_TIER_SCAN_CHARS` stays 300. A positive marker past it is ignored, which fails safe; a refusal past it is honoured anyway, since `refuses_external` scans the whole block. If that window ever widens, re-check that prose can't be mistaken for a marker.
+
 ## 2026-09-11 - Opus 5 - Providers can be parked, same as accounts
 
 ### 1. Context Snapshot

@@ -357,6 +357,21 @@ and every file the block reads all get sent to DeepSeek — not Anthropic, and
 under DeepSeek's own data policy. Fine for a rename in your own repo; think
 twice for anything you wouldn't paste into a stranger's website.
 
+**Keeping a block on Claude, permanently, whatever else it says.** Put a
+refusal line near the top:
+
+```
+**CLINE: STOP** — money path. Never external.
+```
+
+`STOP`, `no`, `none`, `off`, `never`, `claude-only`, `anthropic`, `internal`
+and `local` all mean the same thing, and that refusal **beats everything else
+in the block** — a `provider: deepseek` header, a `model: deepseek-pro` line,
+another `CLINE:` marker further up. It also counts wherever it appears, not
+only in the first few lines, and it is re-checked when the run starts, so a
+block already sitting in the queue can't be sent out by an older reading of it.
+Write it on anything that touches money, credentials, or a live system.
+
 **Three more gotchas:**
 
 - `**TIER: CHEAP — EXTERNAL-OK**` on your older blocks does **not** send them
@@ -366,6 +381,11 @@ twice for anything you wouldn't paste into a stranger's website.
   run using Anthropic's rates, so what it prints for a DeepSeek block is a
   rough stand-in — your real bill is on DeepSeek's dashboard. The run summary
   says which blocks those were.
+- **A marker Sandglass doesn't recognise does nothing at all.** `CLINE: prox`
+  (a typo) leaves the block on Claude and prints a warning — it is never
+  treated as "some model name I haven't heard of, send it anyway". Only a
+  recognised tier (`pro`, `flash`), a DeepSeek model id, or the vendor's name
+  routes a block.
 - **Forgot the key?** The block runs on Claude anyway, with a warning, and
   Sandglass quietly swaps `deepseek-pro` for the normal model — Claude has
   never heard of DeepSeek's models, so leaving the name in place would just

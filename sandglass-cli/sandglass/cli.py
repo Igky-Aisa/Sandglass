@@ -33,7 +33,7 @@ from . import dashboard as dashboard_mod
 from . import project_docs, providers as providers_mod, quiet_hours, run_report, updater
 from .project_scaffold import new_claude_project, update_claude_md_template
 from .prompt_source import DEFAULT_QUEUE_SOURCE
-from .queue_manager import QueueManager
+from .queue_manager import QueueManager, refuses_external
 from .storage import StorageService
 
 logger = logging.getLogger(__name__)
@@ -1575,6 +1575,16 @@ def queue_lint() -> None:
         for path in _referenced_paths(p.text):
             if not os.path.exists(path):
                 issues.append(f"references '{path}', which does not exist")
+        # A queued block carries the provider decided when it was imported, so
+        # a queue captured before the marker parser was fixed can still say
+        # "deepseek" on a block whose own text forbids it. The run refuses to
+        # route it anyway, but this is the command people run *before* the run.
+        if p.provider and refuses_external(p.text):
+            issues.append(
+                f"queued for '{p.provider}' but its text refuses external routing "
+                "— it will run on Anthropic; `sandglass queue clear` re-imports it "
+                "cleanly"
+            )
         if issues:
             findings += len(issues)
             console.print(f"[yellow]![/yellow] [{i}] {p.title}")

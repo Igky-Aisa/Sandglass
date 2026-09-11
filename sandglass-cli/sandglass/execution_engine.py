@@ -29,7 +29,7 @@ from .claude_client import (
     TransientConnectionError,
 )
 from .models import ExecutionResult, PromptObject, Response
-from .queue_manager import QueueManager
+from .queue_manager import QueueManager, refuses_external
 from .storage import StorageService
 
 logger = logging.getLogger(__name__)
@@ -1143,6 +1143,25 @@ class ExecutionEngine:
         a guess.
         """
         if not prompt.provider:
+            return None
+
+        # Checked against the block's own text, not just the field, because the
+        # field was decided whenever this queue was imported -- possibly by a
+        # Sandglass that read the marker wrong. A block that says "never
+        # external" anywhere in it does not leave Anthropic, whatever
+        # `queue.json` remembers about it. See `queue_manager.refuses_external`.
+        if refuses_external(prompt.text):
+            if prompt.provider not in self._provider_warned:
+                self._provider_warned.add(prompt.provider)
+                console.print(
+                    f"  [yellow]This block is marked '{prompt.provider}' but its "
+                    "own text refuses external routing — running it on "
+                    "Anthropic.[/yellow]"
+                )
+            logger.warning(
+                "Prompt %s carries provider %s but its text refuses external "
+                "routing; keeping it on Anthropic.", prompt.id, prompt.provider,
+            )
             return None
 
         name = prompt.provider

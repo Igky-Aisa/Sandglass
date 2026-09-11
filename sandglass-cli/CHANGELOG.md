@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.3] - 2026-09-11
+
+### Fixed
+
+- **A `**CLINE: STOP**` that straddled the 300-character marker window was read as `STO` and routed the block to DeepSeek — the exact leak 0.10.0's negation list was written to stop, reopened by one letter.** `_external_defaults` sliced the text *before* matching (`text[:300]`), so a marker beginning at character 290 reached the regex cut in half; a half-read marker is not a non-match, it is a **different value**, and "STO" missed `_CLINE_NEGATIONS` while still being forwarded to the provider as a model name. Measured on the live Azymetrix history: of 37 externally-routed completions, 14 were blocks whose own text forbade it — 11 before 0.10.0 (any marker position), and after it exactly three, at characters 290, 292 and 292, the only positions the window could slice. The last of them is P19.03, a money-path block whose second paragraph reads "Never external", caught mid-run and interrupted at 03:27 UTC with nothing billed. The window now bounds where a marker may **start** (`_marker_match` matches the full text and keeps the first hit beginning inside it), so a marker is always read whole; `TIER:` got the same treatment, where the same slice silently dropped the tier instead.
+- **Routing now fails closed on a value it doesn't recognise.** `Provider.resolve_model` passes an unknown string straight through — correct once the decision to route is made, catastrophic as the basis for making it, since any garbled marker looks exactly like a model id. New `Provider.known_model` accepts a tier, a model the provider already lists, or any vendor-prefixed name (`deepseek-v9-turbo`, so a vendor renaming its models still works) and returns `None` for everything else; an unrecognised marker is logged loudly and the block stays on Anthropic.
+- **A refusal anywhere in a block beats every other routing signal, and is re-checked at run time.** `refuses_external()` scans the whole block rather than the front-matter window, and now outranks `provider:` front matter and a vendor-prefixed `model:` as well as a `CLINE:` marker — a block contradicting itself is resolved toward not spending money at a third party. The engine re-derives it from the block's own text instead of trusting `queue.json`'s stored `provider`, which is what makes the fix retroactive: a queue imported by the old parser still holds `deepseek` on blocks that forbid it, and re-importing is a manual step nobody knows they owe. `sandglass queue lint` flags that stale pairing too, since lint is what people run before a batch.
+- Added `internal` and `local` to the negation list.
+
 ## [0.11.2] - 2026-09-11
 
 ### Added

@@ -86,6 +86,28 @@ def test_a_marked_block_is_routed_and_an_unmarked_one_is_not(qm):
     assert normal["provider"] is None
 
 
+
+def test_a_stale_provider_on_a_refusing_block_is_ignored_at_run_time(qm):
+    """`queue.json` remembers a routing decision made when the block was
+    imported -- possibly by a Sandglass that read the marker wrong. Re-importing
+    is a manual step nobody knows they owe, so the run re-reads the block's own
+    text: a block that says "never external" anywhere in it stays on Anthropic
+    whatever the queued field says.
+
+    This is the retroactive half of the P19.03 fix; without it, every Azymetrix
+    queue captured before the parser was corrected would keep routing.
+    """
+    qm.add_prompt(text="Plain block.")
+    queued = qm.get_all_prompts()
+    queued[0].provider = "deepseek"
+    queued[0].text = "**CLINE: STOP** - money path. Never external.\n\nWrite the close."
+    qm.save_queue(queued)
+
+    client = _RecordingClient()
+    asyncio.run(_engine(qm, client).execute_queue())
+
+    assert client.calls[0]["provider"] is None
+
 def test_a_routed_block_neither_joins_nor_starts_the_chain(qm):
     """Resuming would replay the whole accumulated Claude conversation — every
     file the queue has read so far — to a third-party endpoint, which is a far

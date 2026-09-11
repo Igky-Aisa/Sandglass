@@ -168,6 +168,102 @@ def test_cline_negation_values_never_route(qm, value):
     assert added.provider is None
 
 
+# The live P19.03 block, verbatim down to the character positions: `**CLINE:
+# STOP**` begins at index 290 of the body, so the old `text[:300]` slice fed the
+# regex `**CLINE: STO`, and "STO" missed the negation list by one letter. It ran
+# on DeepSeek -- a money-path block whose own second paragraph says "Never
+# external".
+_STRADDLING_BLOCK = (
+    "model: sonnet\neffort: high\n\n"
+    "**TIER: SONNET** — it decides whether a witnessed exit price exists at all. "
+    "Too weak a model\nsubstitutes a mark for a fill, which is the one thing "
+    "`_write_close`'s docstring forbids by name:\na number the operator reads as "
+    '"what this trade made" beside a price the trade never exited at.\n\n'
+    "**CLINE: STOP** — money path: it writes the realised result of a trade. "
+    "Never external.\n\nGive the OBSERVED close path an exit price too."
+)
+
+
+def test_a_negation_straddling_the_scan_window_still_refuses(qm):
+    """The scan window bounds where a marker may START, not how much of it is read.
+
+    Slicing the text first turns a half-read marker into a *different value*,
+    which is strictly worse than not matching at all: `STO` is not `STOP`, so
+    the block routed. Live incident, Azymetrix P19.03.
+    """
+    body = _STRADDLING_BLOCK.split("\n\n", 1)[1]
+    assert body.index("CLINE") == 290, "the fixture must still straddle the boundary"
+    added = qm.get_prompt(int(qm.add_prompt(text=_STRADDLING_BLOCK)))
+    assert added.provider is None
+    # And the rest of the block's intent survives intact.
+    assert added.model == "sonnet" and added.effort == "high"
+
+
+def test_a_positive_marker_straddling_the_window_is_read_whole(qm):
+    """The same fix in the other direction: `**CLINE: pro**` starting at 295 is
+    a real routing request, not `p`."""
+    text = ("x" * 286) + " **CLINE: pro** and the rest of the block."
+    added = qm.get_prompt(int(qm.add_prompt(text=text)))
+    assert added.provider == "deepseek" and added.model == "deepseek-v4-pro"
+
+
+@pytest.mark.parametrize("value", ["STO", "banana", "sto", "cl", "prox"])
+def test_an_unrecognised_marker_value_does_not_route(qm, value):
+    """Fail closed. Forwarding an unknown value to the vendor is how a mangled
+    marker became a routing decision: `resolve_model` passes anything through,
+    so `STO` looked exactly like a model id. A value that is neither a known
+    tier nor vendor-prefixed is far likelier to be a broken marker than a model.
+    """
+    added = qm.get_prompt(int(qm.add_prompt(text=f"**CLINE: {value}**\n\nDo it.")))
+    assert added.provider is None
+
+
+def test_a_future_vendor_model_id_still_routes(qm):
+    """Fail-closed must not mean "only models Sandglass has heard of": the
+    vendor prefix is enough to be unambiguous about where the block goes."""
+    added = qm.get_prompt(int(qm.add_prompt(text="**CLINE: deepseek-v9-turbo**\n\nDo it.")))
+    assert added.provider == "deepseek" and added.model == "deepseek-v9-turbo"
+
+
+def test_a_refusal_anywhere_in_the_block_beats_every_other_signal(qm):
+    """A block that contradicts itself is resolved toward not spending money at
+    a third party -- including against explicit `provider:` front matter and a
+    vendor-prefixed model name, both of which normally win outright."""
+    text = (
+        "provider: deepseek\nmodel: deepseek-pro\n\n"
+        "Rewrite the ledger writer.\n\n" + ("filler. " * 80) +
+        "\n**CLINE: STOP** — money path. Never external."
+    )
+    added = qm.get_prompt(int(qm.add_prompt(text=text)))
+    assert added.provider is None
+
+
+def test_a_stale_queue_entry_is_refused_at_run_time(qm):
+    """The retroactive half. A queue imported by the buggy parser still holds
+    `provider: deepseek` on a block that forbids it, and re-importing is a
+    manual step nobody knows they owe. The engine therefore re-reads the block's
+    own text rather than trusting the field."""
+    from sandglass.queue_manager import refuses_external
+
+    stale = PromptObject(
+        id="001", title="P19.03", text=_STRADDLING_BLOCK, source="text",
+        provider="deepseek", model="sonnet",
+    )
+    assert refuses_external(stale.text)
+
+
+def test_known_model_accepts_tiers_and_vendor_prefixes_only():
+    deepseek = providers.DEEPSEEK
+    assert deepseek.known_model("pro") == "deepseek-v4-pro"
+    assert deepseek.known_model("deepseek-v4-flash") == "deepseek-v4-flash"
+    assert deepseek.known_model("deepseek-v9-turbo") == "deepseek-v9-turbo"
+    assert deepseek.known_model("STO") is None
+    assert deepseek.known_model("") is None
+    # `resolve_model` stays permissive on purpose -- it runs after the decision
+    # to route has already been made.
+    assert deepseek.resolve_model("STO") == "STO"
+
+
 def test_an_ordinary_block_never_leaves_anthropic(qm):
     added = qm.get_prompt(int(qm.add_prompt(text="Add a badge to the editor.")))
     assert added.provider is None

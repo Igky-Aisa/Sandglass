@@ -50,6 +50,15 @@ TIER_MAP: dict[str, tuple[str | None, str | None]] = {
 # Only look for a tier marker near the top of a block; the word could plausibly
 # appear in prose further down, and a marker buried on line 40 isn't front
 # matter anyway.
+#
+# **The window bounds where a marker may START, never how much of it is read.**
+# Slicing the text first and matching the slice cuts the last marker in half
+# whenever one straddles the boundary, and a half-marker is not a non-match --
+# it is a *different value*. Found live, and it was the worst possible one:
+# `**CLINE: STOP**` began at character 290 of an Azymetrix money-path block, so
+# `text[:300]` handed the regex `**CLINE: STO`, "STO" missed `_CLINE_NEGATIONS`
+# by one letter, and the block that said "Never external" in its own second
+# line was sent to DeepSeek. See `_marker_match`.
 _TIER_SCAN_CHARS = 300
 
 # The marker that sends a block to a non-Anthropic provider -- `**CLINE: pro**`,
@@ -77,12 +86,52 @@ _CLINE_RE = re.compile(
 _CLINE_NEGATIONS = {
     "stop", "no", "none", "off", "never", "false", "n/a", "na",
     "claude", "claude-only", "anthropic", "disabled", "disable",
+    "internal", "local",
 }
 # Which provider a bare tier name means. Only one external provider is wired up
 # (see providers.py), so `CLINE: pro` needs no vendor name -- but a block that
 # does name one (`CLINE: deepseek-v4-pro`) still routes correctly, because the
 # tier value is passed to the provider to resolve.
 DEFAULT_EXTERNAL_PROVIDER = "deepseek"
+
+
+def _marker_match(pattern: "re.Pattern[str]", text: str):
+    """The first `pattern` match that *begins* inside the scan window.
+
+    The difference from `pattern.search(text[:N])` is the whole point: this
+    matches against the full text, so a marker that starts at character 290 is
+    read to its end instead of being chopped at 300 and matching a shorter,
+    entirely different value. See `_TIER_SCAN_CHARS` for the live incident.
+    """
+    for match in pattern.finditer(text):
+        if match.start() < _TIER_SCAN_CHARS:
+            return match
+        break  # finditer is ordered; the first one past the window ends it.
+    return None
+
+
+def refuses_external(text: str) -> bool:
+    """True when this block says, anywhere in it, that it must not leave Anthropic.
+
+    Deliberately scans the **whole** block rather than the front-matter window,
+    and deliberately lets any single negation veto the routing every other
+    marker in the block asks for. Both choices are the same bet: these
+    annotations are written by a human warning a machine off a money path
+    (`**CLINE: STOP** — money path: it writes the realised result of a trade.
+    Never external.`), and the failure modes are not symmetrical. Missing one
+    sends work to a third party against an explicit instruction; over-reading
+    one costs a few cents of Claude quota on a block that could have been
+    cheaper.
+
+    It is also what makes the fix retroactive: `.sandglass/queue.json` holds a
+    `provider` decided when the block was imported, so a queue captured by the
+    buggy parser still says "deepseek" today. Checking the block's own text at
+    run time doesn't care when the snapshot was taken.
+    """
+    return any(
+        match.group(1).strip().lower() in _CLINE_NEGATIONS
+        for match in _CLINE_RE.finditer(text or "")
+    )
 
 
 class QueueManager:
@@ -167,6 +216,18 @@ class QueueManager:
             owner = providers.provider_for_model(model)
             if owner is not None:
                 provider = owner.name
+        # The last word belongs to the block's own safety annotation, over
+        # every other way a provider can be chosen -- a `provider:` header and
+        # a vendor-prefixed model name included. A block carrying both is
+        # contradicting itself, and "don't send this to a third party" is the
+        # half of the contradiction that is expensive to get wrong.
+        if provider and refuses_external(text):
+            logger.warning(
+                "Block %r names provider %r but its text refuses external "
+                "routing; keeping it on Anthropic.",
+                self._derive_title(text, file_path)[:60], provider,
+            )
+            provider = None
         isolate = headers.get("isolate", "").strip().lower() in _TRUTHY
         phase = headers.get("phase") or None
 
@@ -314,7 +375,7 @@ class QueueManager:
         Returns ``(None, None)`` when there is no recognised marker. See
         :data:`TIER_MAP` for why this is read at all.
         """
-        match = _TIER_RE.search(text[:_TIER_SCAN_CHARS])
+        match = _marker_match(_TIER_RE, text)
         if not match:
             return None, None
         return TIER_MAP.get(match.group(1).lower(), (None, None))
@@ -331,18 +392,24 @@ class QueueManager:
         (`deepseek`) to take its default model. An unrecognised value is
         forwarded to the provider rather than rejected here: model names are
         the vendor's to change, and failing a block over a name Sandglass
-        hasn't heard of would age worse than passing it through -- except for
-        `_CLINE_NEGATIONS`, checked first, which are never forwarded: those
-        are the one class of "unrecognised value" that is actually a human
-        telling Sandglass NOT to route, and forwarding one would silently do
-        the opposite of what it says.
+        hasn't heard of would age worse than passing it through.
+
+        **That last rule is now bounded, because it used to fail open.** An
+        unrecognised value is forwarded only when it is a *vendor-prefixed*
+        model id (`deepseek-v9-whatever`), which is still unambiguous about
+        where it goes. A value that is neither a known tier nor prefixed is no
+        longer routed at all: it is far more likely to be a mangled marker than
+        a model, and the cost of guessing wrong is a block leaving Anthropic
+        when nobody asked it to. `refuses_external` is checked first and vetoes
+        the whole thing.
         """
-        match = _CLINE_RE.search(text[:_TIER_SCAN_CHARS])
+        if refuses_external(text):
+            return None, None
+
+        match = _marker_match(_CLINE_RE, text)
         if not match:
             return None, None
         value = match.group(1).strip()
-        if value.lower() in _CLINE_NEGATIONS:
-            return None, None
 
         named = providers.get(value)
         if named is not None:  # `CLINE: deepseek`
@@ -351,7 +418,18 @@ class QueueManager:
         provider = providers.get(DEFAULT_EXTERNAL_PROVIDER)
         if provider is None:  # pragma: no cover - only if the registry is gutted
             return None, None
-        return provider.name, provider.resolve_model(value)
+        model = provider.known_model(value)
+        if model is None:
+            # Loud, because the author did write a marker and it is not being
+            # honoured. Silence here is how a typo becomes "why did that run on
+            # Claude" three hours later -- or, before the fail-closed rule,
+            # "why did that run on DeepSeek".
+            logger.warning(
+                "Ignoring routing marker %r: it is not a %s tier or model id. "
+                "The block will run on Anthropic.", value, provider.name,
+            )
+            return None, None
+        return provider.name, model
 
     @staticmethod
     def _derive_title(text: str, file_path: str | None) -> str:

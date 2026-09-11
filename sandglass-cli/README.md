@@ -397,6 +397,17 @@ model: deepseek-pro
 Rename every `foo_bar` to `fooBar` across `lib/models/`.
 ```
 
+**A block can also refuse to leave Anthropic, and that refusal always wins.**
+`**CLINE: STOP**` — or `no`, `none`, `off`, `never`, `claude-only`, `anthropic`
+— keeps the block on Claude no matter what else it says, including explicit
+`provider:` front matter and a vendor-prefixed model name. It is honoured
+wherever it appears in the block, not only in the front-matter window, and it is
+re-checked from the block's own text when the run starts, so a queue captured
+before this existed cannot route it either. A routing value that is neither a
+known tier nor a vendor-prefixed model id (`deepseek-…`) does **not** route: it
+is far more likely to be a mangled marker than a model, and the run says so
+rather than guessing.
+
 `deepseek-pro` → `deepseek-v4-pro`, `deepseek-flash` → `deepseek-v4-flash`;
 literal ids work too, and so does `--model deepseek-pro` on `queue add`. Two
 other spellings mean the same thing: a `**CLINE: pro**` marker near the top of

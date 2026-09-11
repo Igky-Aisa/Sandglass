@@ -90,11 +90,42 @@ class Provider:
     docs_url: str
 
     def resolve_model(self, tier_or_model: Optional[str]) -> str:
-        """Turn `pro`, `flash`, or a literal model id into a model id."""
+        """Turn `pro`, `flash`, or a literal model id into a model id.
+
+        Permissive by design, and only safe to call once the decision to route
+        here has already been made: it passes an unknown string straight
+        through, so the vendor can ship a model this Sandglass has never heard
+        of. Use `known_model` to *make* that decision.
+        """
         if not tier_or_model:
             return self.default_model
         key = tier_or_model.strip().lower()
         return self.tiers.get(key, tier_or_model.strip())
+
+    def known_model(self, tier_or_model: Optional[str]) -> Optional[str]:
+        """The model this value names here, or None if it names nothing.
+
+        The strict half of `resolve_model`, for the one caller that is deciding
+        whether a block leaves Anthropic at all. Accepts a tier (`pro`), a model
+        id this provider already lists, or any **vendor-prefixed** name
+        (`deepseek-v9-turbo`) -- that prefix is what keeps the "the vendor may
+        rename its models" case working without accepting arbitrary strings.
+
+        Everything else returns None, and the difference is not academic: a
+        marker sliced in half by a scan window (`STO`) reached `resolve_model`,
+        came back unchanged, and routed a money-path block to a third party
+        because a passed-through string looked exactly like a model id.
+        """
+        if not tier_or_model:
+            return None
+        key = tier_or_model.strip().lower()
+        if key in self.tiers:
+            return self.tiers[key]
+        if key in set(self.tiers.values()):
+            return key
+        if key == self.name or key.startswith(f"{self.name}-"):
+            return tier_or_model.strip()
+        return None
 
     def subprocess_env(self, api_key: str) -> dict:
         """The environment an external `claude` subprocess should run under.
