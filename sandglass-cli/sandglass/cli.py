@@ -1103,9 +1103,16 @@ def providers_list() -> None:
     console.print(f"[bold]Providers[/bold] [dim]({path})[/dim]")
 
     for name, provider in sorted(providers_mod.PROVIDERS.items()):
+        parked = bool(registry and registry.is_parked(name))
         key = registry.key_for(name) if registry else None
         count = registry.key_count(name) if registry else 0
-        if key:
+        if parked:
+            # Not rendered as a problem: it is a state somebody chose, and the
+            # keys are still there. Same wording as a disabled account, on
+            # purpose -- they are the same gesture on two kinds of credential.
+            kept = f" ({count} keys kept)" if count > 1 else " (key kept)" if count else ""
+            mark = f"[dim]○ parked — skipped by every run{kept}[/dim]"
+        elif key:
             problem = providers_mod.looks_malformed(key)
             # The count matters operationally: with one key, a vendor running
             # out of credit mid-run puts every block marked for it back on
@@ -1133,6 +1140,65 @@ def providers_list() -> None:
         "([cyan]sandglass providers set <name> --add[/cyan]), then falls back to "
         "Claude — and only waits if Claude has no quota either.[/dim]"
     )
+    console.print(
+        "[dim]Switch one off without losing its key: [cyan]sandglass providers "
+        "park <name>[/cyan] · back on with [cyan]sandglass providers enable "
+        "<name>[/cyan].[/dim]"
+    )
+
+
+def _set_provider_enabled(name: str, enabled: bool) -> None:
+    """Flip one provider's switch, then show the list. Shared by two commands.
+
+    The change and its result come out of the same command for the same reason
+    `sandglass accounts --disable` prints the pool afterwards: the question
+    immediately after "park deepseek" is always "so what runs where now".
+    """
+    try:
+        changed = providers_mod.set_enabled(name, enabled)
+    except providers_mod.ProvidersError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    state = "enabled" if enabled else "parked"
+    if changed:
+        console.print(f"[green]✔[/green] {name.strip().lower()} is now [bold]{state}[/bold].")
+    else:
+        console.print(f"[dim]{name.strip().lower()} was already {state}; nothing to do.[/dim]")
+    console.print()
+    providers_list()
+
+
+@providers_app.command("park")
+def providers_park(
+    name: str = typer.Argument(..., help="Provider name, e.g. deepseek."),
+) -> None:
+    """Stop sending work to an external provider, keeping its key.
+
+    For the evening you would rather not spend on a metered vendor at all —
+    blocks that ask for it run on Claude instead, exactly as they would if no
+    key were configured, and nothing has to be edited out of the queue.
+
+    Distinct from `--no-external`, which does the same thing for **one run**:
+    this one is a standing decision and survives until you undo it.
+    """
+    _set_provider_enabled(name, False)
+
+
+@providers_app.command("enable")
+def providers_enable(
+    name: str = typer.Argument(..., help="Provider name, e.g. deepseek."),
+) -> None:
+    """Put a parked provider back into service. The key was never deleted."""
+    _set_provider_enabled(name, True)
+
+
+@providers_app.command("disable", hidden=True)
+def providers_disable(
+    name: str = typer.Argument(..., help="Provider name, e.g. deepseek."),
+) -> None:
+    """Alias for `park` — the accounts pool spells this one 'disable'."""
+    _set_provider_enabled(name, False)
 
 
 def _stored_keys(entry: object) -> list[str]:
@@ -1198,6 +1264,10 @@ def providers_set(
     # Preserve whichever shape the file is already in, so this never silently
     # rewrites a hand-authored file into the other one.
     target = existing.setdefault("providers", {}) if "providers" in existing else existing
+    # The entry is rewritten below, so the on/off flag has to be carried across
+    # explicitly: storing a key must never be a way to silently un-park a
+    # vendor somebody deliberately switched off.
+    was_enabled = providers_mod._entry_enabled(target.get(provider.name))
     if add:
         kept = _stored_keys(target.get(provider.name))
         if api_key in kept:
@@ -1206,6 +1276,8 @@ def providers_set(
         target[provider.name] = {"api_keys": kept + [api_key]}
     else:
         target[provider.name] = {"api_key": api_key}
+    if not was_enabled:
+        target[provider.name]["enabled"] = False
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
@@ -1221,6 +1293,13 @@ def providers_set(
         f"[dim]Blocks marked [cyan]**CLINE: pro**[/cyan] now run on "
         f"{provider.tiers['pro']} instead of consuming Claude quota.[/dim]"
     )
+    # Storing a key is not the same gesture as un-parking, so this says so
+    # rather than doing it: routing work outward is always an explicit act.
+    if not providers_mod._entry_enabled(target.get(provider.name)):
+        console.print(
+            f"[yellow]⚠ '{provider.name}' is parked, so nothing will use this key "
+            f"yet — [cyan]sandglass providers enable {provider.name}[/cyan].[/yellow]"
+        )
 
 
 @app.command()

@@ -208,6 +208,35 @@ def test_providers_card_shows_out_of_credit_only_from_a_live_registry():
     assert "fall back to Claude" in card
 
 
+def test_providers_card_shows_a_parked_vendor_as_a_choice_not_a_problem():
+    from sandglass.providers import ProviderRegistry
+
+    registry = ProviderRegistry(
+        keys={"deepseek": ["sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}, parked={"deepseek"}
+    )
+    card = dashboard._providers_card(registry)
+    assert "parked" in card
+    # Never "no key": the key is still there, and telling someone to configure
+    # what they deliberately switched off is the most confusing thing the card
+    # could say.
+    assert "no key" not in card
+    assert "key kept" in card
+
+
+def test_providers_card_offers_the_opposite_switch_on_a_served_page():
+    from sandglass.providers import ProviderRegistry
+
+    live = ProviderRegistry(keys={"deepseek": ["sk-" + "c" * 32]})
+    assert 'data-enable="false">Park' in dashboard._providers_card(live, live=True)
+
+    parked = ProviderRegistry(keys={"deepseek": ["sk-" + "c" * 32]}, parked={"deepseek"})
+    assert 'data-enable="true">Enable' in dashboard._providers_card(parked, live=True)
+
+    # A written-out dashboard.html has nothing listening, so a button there
+    # would be decoration -- same rule as the account rows.
+    assert "prov-toggle" not in dashboard._providers_card(live)
+
+
 def test_providers_card_says_nothing_routes_there_on_its_own():
     card = dashboard._providers_card(_registry({"deepseek": ["sk-" + "c" * 32]}))
     assert "opt-in per block" in card

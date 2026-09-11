@@ -403,6 +403,32 @@ dry. `sandglass providers list` shows how many are stored. Two keys on two
 separate DeepSeek accounts is the difference between a run that keeps going on
 DeepSeek and one that spends the rest of the night on Claude quota.
 
+**Turning DeepSeek off for a while — without losing your key:**
+
+```
+sandglass providers park deepseek       # stop sending anything there
+sandglass providers enable deepseek     # start again
+```
+
+Parked, DeepSeek is skipped by every run from now on: a block that asks for it
+runs on Claude instead, and says so as it goes. Your key stays exactly where it
+is, so turning it back on is one command — you never have to paste the key
+again. Both commands print the provider list straight afterwards, where a
+parked vendor reads `○ parked`. In `sandglass ui` this is the **Park / Enable**
+button on the External providers row, the same button the accounts have.
+
+**When not to use it:** not for a key that has simply run out of money —
+Sandglass already moves past that on its own for the rest of the run, and
+topping the account up is what fixes it. Park it when you've decided you don't
+want to spend anything there for a while, or when you want a stretch of work
+kept on Claude without editing every block. If you only mean *this one run*,
+use `sandglass execute --no-external` instead and change nothing permanently.
+
+One thing that surprises people: storing a key with `sandglass providers set`
+does **not** un-park a provider. It stores the key and warns you that nothing
+will use it yet — sending work outside Anthropic always stays something you
+switched on deliberately.
+
 ---
 
 ## 5. Using future_prompts.md as your default queue
@@ -731,6 +757,10 @@ Sandglass is built so a bad run never loses your queue:
 | `sandglass accounts --probe` | Spend one tiny request per account to prove each token still works |
 | `sandglass accounts --disable NAME` | Park an account — every run skips it until you re-enable it (see §6) |
 | `sandglass accounts --enable NAME` | Put a parked account back into the rotation |
+| `sandglass providers list` | Show which external providers have a key, and which are parked (see §4) |
+| `sandglass providers set NAME` | Store an API key for an external provider (see §4) |
+| `sandglass providers park NAME` | Stop sending work to an external provider, keeping its key (see §4) |
+| `sandglass providers enable NAME` | Put a parked provider back into service |
 | `sandglass rotate-logs [--keep N]` | Archive old work-log / prompt-history entries (see §12) |
 | `sandglass update [--check]` | Update Sandglass itself from its git repo (see §2) |
 | `sandglass history` | Show everything ever completed, with tokens and cost |
@@ -972,7 +1002,9 @@ yet, red if a vendor has run out of credit mid-run. These are deliberately a
 separate panel from your accounts, because they work differently: they're
 **pay-per-token**, and **nothing goes to them unless a block asks by name**. A
 green dot there means "available if a block asks for it", not "some of your work
-is going there".
+is going there". A vendor you've parked (§4) shows grey as `○ parked` with its
+key count kept, and on `sandglass ui` its button reads **Enable** instead of
+**Park**.
 
 One thing that panel can only show *during* a run: **out of credit**. Sandglass
 tracks a spent balance for the length of one run and never writes it down —

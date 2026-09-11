@@ -1129,10 +1129,10 @@ class ExecutionEngine:
     ) -> "tuple[providers.Provider, str] | None":
         """The external endpoint this block asked for, if it can be used.
 
-        ``None`` means "run it on Anthropic", which covers four cases: the
+        ``None`` means "run it on Anthropic", which covers five cases: the
         block never asked, `--no-external` overrode it, the marker named a
-        provider Sandglass doesn't know, or no API key is configured for the
-        one it named.
+        provider Sandglass doesn't know, the vendor is parked, or no API key is
+        configured for the one it named.
 
         The last two **fall back rather than fail**, loudly. A routing marker
         is a preference about cost, not a correctness requirement: the block
@@ -1174,9 +1174,22 @@ class ExecutionEngine:
             # Two different reasons to be here, and telling them apart is the
             # difference between "add a config line" and "top the account up".
             spent = bool(registry and registry.is_out_of_credit(provider.name))
+            parked = bool(registry and registry.is_parked(provider.name))
             if name not in self._provider_warned:
                 self._provider_warned.add(name)
-                if spent:
+                if parked:
+                    # A third reason, and the only one nobody needs to fix:
+                    # somebody switched this vendor off on purpose, so the
+                    # message names the undo rather than suggesting a repair.
+                    console.print(
+                        f"  [yellow]'{provider.name}' is parked — running this "
+                        "block, and the rest marked for it, on Claude.[/yellow]"
+                    )
+                    console.print(
+                        f"  [dim]Unpark it with `sandglass providers enable "
+                        f"{provider.name}`.[/dim]"
+                    )
+                elif spent:
                     console.print(
                         f"  [yellow]'{provider.name}' has no credit left — running "
                         "this block, and the rest marked for it, on Claude.[/yellow]"
@@ -1191,7 +1204,8 @@ class ExecutionEngine:
                     )
             logger.warning(
                 "Prompt %s requested provider %s (%s); falling back to Anthropic",
-                prompt.id, name, "out of credit" if spent else "no key configured",
+                prompt.id, name,
+                "parked" if parked else "out of credit" if spent else "no key configured",
             )
             return None
         return provider, key

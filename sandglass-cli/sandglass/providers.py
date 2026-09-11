@@ -41,7 +41,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .accounts import TOKEN_ENV_VAR
+# `_atomic_write_json` is shared rather than copied: both files hold live
+# credentials, and the one rule that matters -- never leave a truncated
+# credential file behind -- must be implemented once or it will drift.
+from .accounts import TOKEN_ENV_VAR, AccountsError, _atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -164,11 +167,24 @@ class ProviderRegistry:
     by a human topping the account up, not by time passing, so writing it to
     disk would bench a freshly-funded key on the next run for no reason. A new
     `sandglass execute` always gives every key another chance.
+
+    **Parking is the opposite: an instruction, so it *is* persisted.** A parked
+    vendor keeps its keys and is simply never used, exactly as a disabled
+    account is skipped by the pool — "stop sending work there until I say
+    otherwise" has to survive the run that heard it, or the command is
+    decoration. It is distinct from `--no-external`, which turns off every
+    vendor for one run, and from having no key, which is a thing to fix rather
+    than a decision someone made.
     """
 
     # Written as either one key or several; normalised to a list below so the
     # rest of the module only ever deals with one shape.
     keys: dict[str, "str | list[str]"]
+    # Vendors switched off in the providers file. Held separately from `keys`
+    # rather than by dropping them, so the page and the CLI can say "parked"
+    # instead of the actively misleading "no key" -- and so re-enabling one
+    # doesn't mean typing the key in again.
+    parked: set[str] = field(default_factory=set)
     # Which key each provider is currently on, and the providers whose every
     # key has come back "no credit" during this run.
     _index: dict[str, int] = field(default_factory=dict)
@@ -182,6 +198,7 @@ class ProviderRegistry:
             if usable:
                 normalised[name] = usable
         self.keys = normalised
+        self.parked = {str(n).strip().lower() for n in (self.parked or set())}
 
     @classmethod
     def default_path(cls) -> Path:
@@ -209,8 +226,13 @@ class ProviderRegistry:
         out of credit is only recoverable mid-run if a second one was named::
 
             {"deepseek": {"api_keys": ["sk-first", "sk-second"]}}
+
+        An entry may also be switched off, keeping its keys for later::
+
+            {"deepseek": {"api_key": "sk-...", "enabled": false}}
         """
         keys: dict[str, list[str]] = {}
+        parked: set[str] = set()
 
         # The environment is the weakest source, so it is read first and any
         # file entry overwrites it.
@@ -235,7 +257,15 @@ class ProviderRegistry:
                         path, name, ", ".join(sorted(PROVIDERS)),
                     )
                     continue
-                keys[name] = _entry_keys(path, name, entry)
+                enabled = _entry_enabled(entry)
+                if not enabled:
+                    parked.add(name)
+                # A parked entry is allowed to carry no key at all: parking is
+                # a decision that can be taken before a key ever exists, and
+                # demanding one would make "off" harder to write than "on".
+                entry_keys = _entry_keys(path, name, entry, required=enabled)
+                if entry_keys:
+                    keys[name] = entry_keys
             _warn_if_world_readable(path)
 
         if keys:
@@ -246,12 +276,22 @@ class ProviderRegistry:
                     for name, k in sorted(keys.items())
                 ),
             )
-        return cls(keys=keys)
+        if parked:
+            logger.info("Providers parked (skipped until re-enabled): %s",
+                        ", ".join(sorted(parked)))
+        return cls(keys=keys, parked=parked)
 
     # --- Keys in use ------------------------------------------------------
 
     def key_for(self, name: str) -> Optional[str]:
-        """The key a call to ``name`` should use right now, if any is left."""
+        """The key a call to ``name`` should use right now, if any is left.
+
+        Parked vendors return None here, which is what makes one switch enough:
+        every caller already handles "no key available" by falling back to
+        Anthropic, so nothing else has to learn about parking to respect it.
+        """
+        if self.is_parked(name):
+            return None
         pool = self.keys.get(name) or []
         index = self._index.get(name, 0)
         if name in self._spent or index >= len(pool):
@@ -260,6 +300,10 @@ class ProviderRegistry:
 
     def has(self, name: str) -> bool:
         return self.key_for(name) is not None
+
+    def is_parked(self, name: str) -> bool:
+        """True when this vendor is switched off in the providers file."""
+        return (name or "").strip().lower() in self.parked
 
     def key_count(self, name: str) -> int:
         """How many keys are configured for ``name``, spent ones included."""
@@ -307,7 +351,9 @@ class ProviderRegistry:
         return revived
 
 
-def _entry_keys(path: Path, name: str, entry: object) -> list[str]:
+def _entry_keys(
+    path: Path, name: str, entry: object, required: bool = True
+) -> list[str]:
     """The keys one providers-file entry declares, in the order written."""
     if isinstance(entry, dict):
         raw = entry.get("api_keys", entry.get("api_key"))
@@ -315,11 +361,99 @@ def _entry_keys(path: Path, name: str, entry: object) -> list[str]:
         raw = entry
     candidates = [raw] if isinstance(raw, str) else list(raw or []) if isinstance(raw, list) else []
     keys = [k.strip() for k in candidates if isinstance(k, str) and k.strip()]
-    if not keys:
+    if not keys and required:
         raise ProvidersError(
             f"{path}: provider {name!r} has no 'api_key' (or 'api_keys')."
         )
     return keys
+
+
+def _entry_enabled(entry: object) -> bool:
+    """Read a provider entry's on/off state, accepting either spelling.
+
+    Mirrors `accounts._entry_enabled` deliberately, down to which key wins:
+    the two files are edited by the same person on the same evening, and a
+    provider that honoured only one of `enabled`/`disabled` would be a trap.
+    Anything unparseable counts as enabled, which is also the harmless
+    direction here -- a block still only reaches a vendor by asking for it.
+    """
+    if not isinstance(entry, dict):
+        return True
+    if "enabled" in entry:
+        return bool(entry.get("enabled"))
+    if "disabled" in entry:
+        return not bool(entry.get("disabled"))
+    return True
+
+
+def set_enabled(
+    name: str,
+    enabled: bool,
+    path: Optional[Path] = None,
+) -> bool:
+    """Park an external provider, or put it back. Returns True if that changed.
+
+    The counterpart to `accounts.set_enabled`, and written back to the same
+    place the keys live for the same reason: parking is an instruction, so it
+    has to outlive the run that heard it. A state kept only in run-state would
+    quietly evaporate the next time `.sandglass/` was cleaned, and the vendor
+    would start taking work again with nobody having said so.
+
+    Unlike the account pool there is **no last-one-standing guard**: every
+    provider being off is a perfectly coherent state -- it just means every
+    block runs on Anthropic, which is what an unconfigured machine does anyway.
+
+    Parking keeps the keys. Re-enabling is a switch, never a re-paste, so
+    turning a vendor off for a week costs nothing to undo.
+    """
+    name = (name or "").strip().lower()
+    if name not in PROVIDERS:
+        raise ProvidersError(
+            f"Unknown provider {name!r}. Known: {', '.join(sorted(PROVIDERS))}."
+        )
+
+    path = path or ProviderRegistry.default_path()
+    raw: dict = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProvidersError(f"Could not read {path}: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise ProvidersError(f"{path}: expected a JSON object at the top level.")
+        raw = loaded
+
+    # Preserve whichever shape the file is already in, exactly as
+    # `providers set` does, so this never silently rewrites a hand-authored
+    # file into the other one.
+    entries = raw["providers"] if isinstance(raw.get("providers"), dict) else raw
+    entry = entries.get(name)
+    if isinstance(entry, str):
+        # A bare `"deepseek": "sk-..."` has nowhere to hang a flag, so it is
+        # widened to the object form -- keeping the key, which is the whole
+        # point of parking rather than deleting.
+        entry = {"api_key": entry}
+    elif not isinstance(entry, dict):
+        # Parking a vendor before its key exists is legitimate: "never send
+        # anything there" is a decision, not a configuration step.
+        entry = {}
+
+    if _entry_enabled(entry) == enabled and name in entries:
+        return False
+
+    entry["enabled"] = enabled
+    # Never leave both spellings behind -- a stale `disabled` that disagrees
+    # with the `enabled` just written is a bug waiting for the next reader.
+    entry.pop("disabled", None)
+    entries[name] = entry
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _atomic_write_json(path, raw)
+    except AccountsError as exc:  # shared writer, module-local error type
+        raise ProvidersError(str(exc)) from exc
+    logger.info("%s provider %r in %s", "Enabled" if enabled else "Parked", name, path)
+    return True
 
 
 def get(name: Optional[str]) -> Optional[Provider]:

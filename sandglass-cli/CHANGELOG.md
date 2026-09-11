@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.11.2] - 2026-09-11
+
+### Added
+
+- **`sandglass providers park <name>` / `enable <name>`, and the same switch on every External providers row in `sandglass ui`.** An Anthropic account could already be taken out of the rotation and put back with one button; a metered vendor could not, so "don't spend money at DeepSeek tonight" meant either hand-editing `~/.sandglass/providers.json` — deleting the key and pasting it back later — or remembering `--no-external` on every single run. Parking is written next to the key in `providers.json`, not in `.sandglass/`, for the same reason a disabled account lives in `accounts.json`: exhaustion expires on a clock, an instruction must not, and a state that evaporated the next time `.sandglass/` was cleaned would silently start sending work outward again with nobody having said so. **The key is kept** — re-enabling is a switch, never a re-paste. Both `enabled: false` and `disabled: true` are honoured, matching `accounts.json` exactly, since the two files are edited by the same person on the same evening. `ProviderRegistry.key_for` returns `None` for a parked vendor, which is what makes one switch enough: every caller already falls back to Anthropic when no key is available, so nothing else had to learn about parking to respect it — including a key sitting in `$DEEPSEEK_API_KEY`, which cannot undo a parking. Deliberately **no last-one-standing guard**, unlike the account pool: every provider off just means every block runs on Anthropic, which is what an unconfigured machine does anyway. A run that meets a parked vendor says so once and names the undo rather than suggesting a repair, and `providers list` / the dashboard render it `○ parked` with its key count rather than the actively misleading "no key". `providers set` on a parked vendor stores the key and **warns instead of silently un-parking** — routing work to a third party stays an explicit act.
+
 ## [0.11.1] - 2026-08-23
 
 ### Added

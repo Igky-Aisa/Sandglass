@@ -419,6 +419,28 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "message": f"{name} is now {state}."})
             return
 
+        if parsed.path == "/api/provider":
+            # The same switch as /api/account, on the other kind of credential:
+            # park a metered vendor and blocks marked for it run on Claude
+            # instead. Only the name and a boolean cross the wire -- the key
+            # itself is never sent to this server or rendered on the page.
+            name, enabled = payload.get("name"), payload.get("enabled")
+            if not isinstance(name, str) or not isinstance(enabled, bool):
+                self._json(
+                    {"ok": False, "message": "Expected a name and a state."}, 400
+                )
+                return
+            from .providers import ProvidersError, set_enabled as set_provider_enabled
+
+            try:
+                set_provider_enabled(name, enabled)
+            except ProvidersError as exc:
+                self._json({"ok": False, "message": str(exc)}, 409)
+                return
+            state = "enabled" if enabled else "parked"
+            self._json({"ok": True, "message": f"{name} is now {state}."})
+            return
+
         self._send(404, b"Not found", "text/plain; charset=utf-8")
 
 

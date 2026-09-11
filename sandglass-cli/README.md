@@ -202,7 +202,9 @@ sandglass ui --port 8800     # fixed port; default 0 = let the OS pick a free on
   and the queue is left exactly as it was. If it hasn't stopped in 10 seconds it
   is killed.
 - **Park / Enable** on each account row is `sandglass accounts --disable/--enable`
-  without the typing.
+  without the typing — and the same switch sits on each **External providers**
+  row (`sandglass providers park/enable`), so turning DeepSeek off for the night
+  is one click rather than an edit to `providers.json`.
 
 A **Queue** card carries the free, non-streaming commands: **Show queue**
 (`queue list`), **Check for problems** (`queue lint`), **Dry run**
@@ -223,7 +225,8 @@ with a quota that refreshes on a clock and the pool rotates to it by itself,
 while a provider is metered and is never reached unless a block asks for it by
 name. "deepseek ●" means available on request, not in use. Out-of-credit shows
 only on a page the run itself regenerated, since that state is per-run and never
-persisted.
+persisted. A parked vendor renders `○ parked` with its key count kept, and its
+button reads **Enable** instead of **Park**.
 
 It runs in the **foreground** and takes any run it started with it when you
 Ctrl-C — it is the thing you are watching, not a daemon left running alongside
@@ -381,6 +384,8 @@ file edits and shell commands never leave your machine.
 ```bash
 sandglass providers set deepseek --key sk-...   # prompted, hidden, if omitted
 sandglass providers list                        # what's configured
+sandglass providers park deepseek               # stop using it, keep the key
+sandglass providers enable deepseek             # back in service
 ```
 
 Then say so in the block. Naming the model is enough — you don't need a
@@ -440,6 +445,19 @@ second key with `sandglass providers set deepseek --add` (without `--add` the
 new key replaces the stored one); `providers list` shows how many are held.
 Credit state is per-run and never written to disk — an empty balance is undone
 by paying, not by time, so persisting it would bench a funded key for nothing.
+
+**Parking a vendor** is the standing version of `--no-external`. `sandglass
+providers park deepseek` switches it off until you say otherwise: blocks marked
+for it run on Claude exactly as they would with no key configured, the run says
+so once and names the undo, and the key stays in the file — re-enabling is a
+switch, never a re-paste. The flag lives in `providers.json` next to the key,
+for the same reason a disabled account lives in `accounts.json`: an instruction
+must not evaporate when `.sandglass/` is cleaned. `--no-external` still exists
+and still wins, but it only covers one run. Unlike the account pool there is no
+last-one-standing guard — every provider parked simply means every block runs on
+Anthropic, which is what an unconfigured machine does anyway. Both commands print
+the list afterwards, and `providers list` renders a parked vendor as `○ parked`.
+Storing a key for a parked vendor does *not* quietly un-park it; it says so.
 
 No key configured, or `--no-external`? The block runs on Claude, with a warning
 — the fallback direction is always *toward* Anthropic, never silently outward.

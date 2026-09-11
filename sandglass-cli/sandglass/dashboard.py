@@ -283,6 +283,18 @@ def _live_script(key: str) -> str:
         "      enabled: btn.dataset.enable === 'true'\n"
         "    }).then(refreshCards);\n"
         "  });\n"
+        "  // Same shape for providers, and a separate listener rather than\n"
+        "  // a shared one: the two endpoints write different files and\n"
+        "  // refuse for different reasons.\n"
+        "  document.addEventListener('click', function (ev) {\n"
+        "    var btn = ev.target.closest ? ev.target.closest('.prov-toggle') : null;\n"
+        "    if (!btn) { return; }\n"
+        "    btn.disabled = true;\n"
+        "    post('/api/provider', {\n"
+        "      name: btn.dataset.name,\n"
+        "      enabled: btn.dataset.enable === 'true'\n"
+        "    }).then(refreshCards);\n"
+        "  });\n"
         "  pollState();\n"
         "  setInterval(pollState, 1200);\n"
         "  setInterval(refreshCards, 6000);\n"
@@ -368,7 +380,7 @@ def _accounts_card(storage: StorageService, live: bool = False) -> str:
     )
 
 
-def _providers_card(registry=None) -> str:
+def _providers_card(registry=None, live: bool = False) -> str:
     """Render the non-Anthropic endpoints a block can be routed to.
 
     Kept as a separate card from Accounts rather than four rows in one list,
@@ -386,6 +398,12 @@ def _providers_card(registry=None) -> str:
 
     **Key counts, never keys.** Same reason as the accounts card: this page is
     written inside the project tree.
+
+    On a served page each row carries the same park/enable switch an account
+    row does. The gesture is identical on purpose -- "stop using this one, keep
+    it configured" -- even though the two things being switched off are not
+    alike, because the alternative is remembering that one of them is a button
+    and the other is a file you have to edit by hand.
     """
     try:
         from . import providers as providers_mod
@@ -406,8 +424,14 @@ def _providers_card(registry=None) -> str:
         key = registry.key_for(name) if registry else None
         count = registry.key_count(name) if registry else 0
         spent = bool(registry and registry.is_out_of_credit(name))
+        parked = bool(registry and registry.is_parked(name))
 
-        if spent:
+        if parked:
+            # Checked before out-of-credit and before the key: parked is a
+            # decision, and a decision outranks a diagnosis on the same row.
+            kept = f" · {count} keys kept" if count > 1 else " · key kept" if count else ""
+            color, label = _IDLE_COLOR, f"parked — blocks run on Claude{kept}"
+        elif spent:
             # Only ever true mid-run. A human topping the account up is what
             # undoes this, not waiting, so it is phrased as an instruction.
             color, label = _RED, "out of credit — blocks fall back to Claude"
@@ -425,12 +449,22 @@ def _providers_card(registry=None) -> str:
         else:
             color, label = _IDLE_COLOR, f"no key — sandglass providers set {name}"
 
+        # Rendered from the same state the label is, so the two can never
+        # disagree about which way the switch should go.
+        toggle = ""
+        if live:
+            toggle = (
+                f'<button class="btn btn-mini prov-toggle" data-name="'
+                f'{html.escape(name, quote=True)}" data-enable='
+                f'"{"true" if parked else "false"}">'
+                f'{"Enable" if parked else "Park"}</button>'
+            )
         rows.append(
             '<div class="acct">'
             f'<span class="acct-dot" style="--c:{color}"></span>'
             f'<span class="acct-name">{html.escape(name)}</span>'
             f'<span class="acct-state">{html.escape(label)}</span>'
-            "<span></span>"
+            f'{toggle or "<span></span>"}'
             "</div>"
         )
 
@@ -492,7 +526,7 @@ def generate(
     live = bool(live_key)
     phases_section = _phase_rows(phases)
     accounts_section = _accounts_card(storage, live=live)
-    providers_section = _providers_card(registry)
+    providers_section = _providers_card(registry, live=live)
     control_section = _control_bar(live)
     # A served page refreshes itself from JavaScript, which can leave the log
     # scrolled where you left it and a button focused. A meta refresh would

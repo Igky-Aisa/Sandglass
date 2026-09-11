@@ -388,3 +388,118 @@ def test_a_refusal_about_money_is_told_apart_from_one_about_speed(text, credit):
     from sandglass.claude_client import ClaudeClient
 
     assert ClaudeClient._looks_like_credit_error(text) is credit
+
+
+# --- Parking a vendor -----------------------------------------------------
+#
+# The persistent counterpart to `--no-external`: a standing "don't send work
+# there", written to the same file the keys are, and undone by a switch rather
+# than by re-pasting a key.
+
+
+def test_a_parked_provider_hands_out_no_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text(
+        json.dumps({"deepseek": {"api_key": "sk-still-here-1234567890", "enabled": False}})
+    )
+    registry = providers.ProviderRegistry.load(path)
+    assert registry.is_parked("deepseek")
+    assert registry.key_for("deepseek") is None
+    assert not registry.has("deepseek")
+    # The key is kept, which is the whole difference between parking and
+    # deleting: re-enabling must never mean typing it in again.
+    assert registry.key_count("deepseek") == 1
+
+
+def test_disabled_is_honoured_as_well_as_enabled(tmp_path, monkeypatch):
+    """Both spellings are obvious things to write by hand, as in accounts.json."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text(
+        json.dumps({"deepseek": {"api_key": "sk-a-key-1234567890", "disabled": True}})
+    )
+    assert providers.ProviderRegistry.load(path).is_parked("deepseek")
+
+
+def test_parking_beats_a_key_in_the_environment(tmp_path, monkeypatch):
+    """Parking is an instruction, so a key lying around in the shell can't undo it."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-from-the-environment")
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps({"deepseek": {"enabled": False}}))
+    assert providers.ProviderRegistry.load(path).key_for("deepseek") is None
+
+
+def test_a_parked_entry_may_carry_no_key_at_all(tmp_path, monkeypatch):
+    """"Never send anything there" is a decision, not a configuration step."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps({"deepseek": {"enabled": False}}))
+    registry = providers.ProviderRegistry.load(path)
+    assert registry.is_parked("deepseek")
+    assert registry.key_count("deepseek") == 0
+
+
+def test_set_enabled_round_trips_and_keeps_the_key(tmp_path):
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps({"deepseek": {"api_key": "sk-keep-me-1234567890"}}))
+
+    assert providers.set_enabled("deepseek", False, path) is True
+    assert providers.set_enabled("deepseek", False, path) is False  # already parked
+    assert json.loads(path.read_text())["deepseek"]["api_key"] == "sk-keep-me-1234567890"
+
+    assert providers.set_enabled("deepseek", True, path) is True
+    assert providers.ProviderRegistry.load(path).key_for("deepseek") == "sk-keep-me-1234567890"
+
+
+def test_set_enabled_preserves_the_nested_file_shape(tmp_path):
+    path = tmp_path / "providers.json"
+    path.write_text(
+        json.dumps({"providers": {"deepseek": {"api_key": "sk-nested-key-123456"}}})
+    )
+    providers.set_enabled("deepseek", False, path)
+    written = json.loads(path.read_text())
+    assert "deepseek" not in written  # not rewritten into the flat shape
+    assert written["providers"]["deepseek"]["enabled"] is False
+
+
+def test_set_enabled_widens_a_bare_string_entry_without_losing_it(tmp_path):
+    path = tmp_path / "providers.json"
+    path.write_text(json.dumps({"deepseek": "sk-bare-string-1234567890"}))
+    providers.set_enabled("deepseek", False, path)
+    entry = json.loads(path.read_text())["deepseek"]
+    assert entry == {"api_key": "sk-bare-string-1234567890", "enabled": False}
+
+
+def test_set_enabled_never_leaves_both_spellings_behind(tmp_path):
+    path = tmp_path / "providers.json"
+    path.write_text(
+        json.dumps({"deepseek": {"api_key": "sk-a-key-1234567890", "disabled": True}})
+    )
+    providers.set_enabled("deepseek", True, path)
+    entry = json.loads(path.read_text())["deepseek"]
+    assert entry["enabled"] is True and "disabled" not in entry
+
+
+def test_a_provider_can_be_parked_before_its_file_exists(tmp_path):
+    """No file is the normal state of a machine that never opted in; deciding
+    'not this vendor, ever' should not require configuring it first."""
+    path = tmp_path / "nested" / "providers.json"
+    assert providers.set_enabled("deepseek", False, path) is True
+    assert providers.ProviderRegistry.load(path).is_parked("deepseek")
+
+
+def test_parking_an_unknown_provider_is_an_error(tmp_path):
+    with pytest.raises(providers.ProvidersError):
+        providers.set_enabled("some-future-vendor", False, tmp_path / "providers.json")
+
+
+def test_every_provider_may_be_parked_at_once(tmp_path, monkeypatch):
+    """Unlike the account pool there is no last-one-standing guard: all-off just
+    means every block runs on Anthropic, which is what an unconfigured machine does."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    path = tmp_path / "providers.json"
+    for name in providers.PROVIDERS:
+        providers.set_enabled(name, False, path)
+    registry = providers.ProviderRegistry.load(path)
+    assert all(registry.is_parked(name) for name in providers.PROVIDERS)

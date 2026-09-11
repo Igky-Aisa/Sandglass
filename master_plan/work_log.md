@@ -2,6 +2,24 @@
 
 > Older entries live in `master_plan/archive/work_log_archive_2026-08-23.md`. This file keeps the most recent 5 so reading it stays cheap; consult the archive only when you need history older than that.
 
+## 2026-09-11 - Opus 5 - Providers can be parked, same as accounts
+
+### 1. Context Snapshot
+- **Goal**: Give DeepSeek the on/off switch every Anthropic account already has, in the CLI and on the dashboard.
+- **State**: `sandglass/providers.py`, `cli.py`, `webui.py`, `dashboard.py`, `execution_engine.py`; tests in `test_providers.py`, `test_webui.py`, `test_dashboard.py`.
+- **Previous Blocker**: None.
+
+### 2. Work Done
+- **Parked state lives in `providers.json` beside the key, not in `.sandglass/`** — same split as a disabled account: exhaustion expires on a clock, an instruction must not, and a flag cleaned away with run state would resume spending money with nobody having said so. Credit exhaustion stays per-run; only the deliberate switch is persisted.
+- **`key_for()` returns None when parked**, rather than each caller learning a new state. Every consumer already falls back to Anthropic on "no key", so one line covered the engine, the CLI and the card — and it also beats a key sitting in `$DEEPSEEK_API_KEY`, which otherwise would have quietly undone a parking.
+- **No last-one-standing guard**, unlike `accounts.set_enabled`. All-off is coherent here: it means everything runs on Anthropic, which is what an unconfigured machine does. Copying the account guard would have forbidden the most obvious use of the feature.
+- **`providers set` on a parked vendor warns instead of un-parking**, and carries the flag across the entry rewrite (it rewrites the whole entry, so the flag had to be lifted out and put back explicitly — the easy version of this change would have silently re-enabled a vendor on every key update).
+- Three states now read differently on purpose: parked (a decision), out of credit (top it up), no key (configure it). Conflating the first with the last was the pre-existing wording trap.
+
+### 3. Next Steps (For the next agent)
+- `tests/test_webui.py::test_a_read_only_command_runs_and_returns_its_output` times out under the full suite on this machine but passes alone in 24s — it spawns a real `sandglass queue list` subprocess, and Windows' cold Python start overruns the client's socket timeout when the box is loaded. Unrelated to these edits (it failed the same way on a run started before them). If it keeps flapping, lengthen that test's HTTP timeout rather than the command.
+- Parking is per-machine, not per-project. If a project ever needs "never external here", that is a different switch and should probably live in the repo, not `~/.sandglass/`.
+
 ## 2026-08-14 - Claude (Sonnet 5) - `sandglass dashboard` + `phase:` front matter
 
 ### 1. Context Snapshot

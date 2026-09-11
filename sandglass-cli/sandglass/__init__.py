@@ -54,7 +54,7 @@ _logging.basicConfig(
     stream=_sys.stderr,
 )
 
-__version__ = "0.11.1"
+__version__ = "0.11.2"
 
 from .models import PromptObject, Response, ExecutionResult
 from .storage import StorageService

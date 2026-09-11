@@ -212,6 +212,46 @@ def test_account_toggle_reports_a_refusal_rather_than_swallowing_it(server, monk
     assert "only enabled account" in exc.value.read().decode("utf-8")
 
 
+# --- Provider toggles --------------------------------------------------------
+
+
+def test_provider_toggle_rejects_a_malformed_request(server):
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post(server, "/api/provider", {"name": "deepseek"})  # no `enabled`
+    assert exc.value.code == 400
+
+
+def test_provider_toggle_parks_the_named_vendor(server, monkeypatch):
+    from sandglass import providers as providers_mod
+
+    seen = {}
+
+    def _record(name, enabled, path=None):
+        seen.update(name=name, enabled=enabled)
+        return True
+
+    monkeypatch.setattr(providers_mod, "set_enabled", _record)
+
+    status, payload = _post(server, "/api/provider", {"name": "deepseek", "enabled": False})
+    assert status == 200 and payload["ok"] is True
+    assert seen == {"name": "deepseek", "enabled": False}
+    assert "parked" in payload["message"]
+
+
+def test_provider_toggle_reports_a_refusal_rather_than_swallowing_it(server, monkeypatch):
+    from sandglass import providers as providers_mod
+
+    def _refuse(name, enabled, path=None):
+        raise providers_mod.ProvidersError("Unknown provider 'nope'")
+
+    monkeypatch.setattr(providers_mod, "set_enabled", _refuse)
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post(server, "/api/provider", {"name": "nope", "enabled": False})
+    assert exc.value.code == 409
+    assert "Unknown provider" in exc.value.read().decode("utf-8")
+
+
 # --- The command buttons -----------------------------------------------------
 #
 # This endpoint is the one that could turn a page-with-buttons into a way to run
