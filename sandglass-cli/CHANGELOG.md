@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1] - 2026-09-11
+
+### Changed
+
+- **The dashboard's Overall progress card is now the first card on the page, and shorter.** It used to be a 168px ring below the Status card; it's now a slim horizontal bar (percentage + track) above the done/remaining/total row, and it comes first — it's the thing an operator watching a live run actually wants to glance at, not the run's status pill.
+- **Added an ETA to that card.** `_eta_text` derives it from the gaps between the last few `completed_at` timestamps in `.sandglass/history.json` rather than trusting any one block's duration, which swings too wildly on its own (a retry, a quota wait, a provider switch) to be worth showing. Shown as `ETA ~1h 20m (around 14:32 UTC)`; hidden entirely until there are at least two recent completions to measure a pace from, and whenever nothing remains.
+
 ## [0.12.0] - 2026-09-11
 
 ### Fixed

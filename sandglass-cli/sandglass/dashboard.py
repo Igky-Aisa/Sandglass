@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import prompt_source, run_report
 from .storage import StorageService
@@ -90,6 +90,59 @@ def _status_badge(storage: StorageService) -> tuple[str, str, str]:
     color, label = _STATUS_COLORS.get(reason, (_IDLE_COLOR, reason.replace("_", " ").title()))
     _headline, what, _next = run_report.explain(report)
     return color, label, what
+
+
+def _format_duration(seconds: float) -> str:
+    """A short human duration -- "1h 20m", "45m", "30s" -- never more than
+    two units, since a queue's own pace is too noisy for a third to mean
+    anything."""
+    total = int(max(seconds, 0))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
+
+
+def _eta_text(storage: StorageService, remaining: int) -> str:
+    """"ETA ~1h 20m (around 14:32 UTC)" from recent completion speed, or ""
+    when there's nothing to estimate from.
+
+    Derived from the gaps between the last few ``completed_at`` timestamps in
+    ``history.json`` rather than one block's own duration, which swings too
+    wildly on its own (an isolated retry, a quota wait, a switch between
+    providers) to be worth showing. A short recent window tracks current
+    conditions -- current account, current provider mix -- better than
+    averaging over the whole night would.
+    """
+    if remaining <= 0:
+        return ""
+    history = storage.load_json(storage.history_path)
+    completed = history.get("completed", []) if isinstance(history, dict) else []
+    if len(completed) < 2:
+        return ""
+
+    timestamps = []
+    for entry in completed[-10:]:
+        raw = entry.get("completed_at") if isinstance(entry, dict) else None
+        if not raw:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(raw))
+        except ValueError:
+            continue
+    if len(timestamps) < 2:
+        return ""
+
+    span = (timestamps[-1] - timestamps[0]).total_seconds()
+    if span <= 0:
+        return ""
+    avg_seconds = span / (len(timestamps) - 1)
+    eta_seconds = avg_seconds * remaining
+    finish = datetime.now(timezone.utc) + timedelta(seconds=eta_seconds)
+    return f"ETA ~{_format_duration(eta_seconds)} (around {finish.strftime('%H:%M UTC')})"
 
 
 def _phase_rows(phases: dict[str, tuple[int, int]]) -> str:
@@ -520,19 +573,23 @@ def generate(
 
     if counted is None:
         progress_block = (
-            '<div class="ring-empty">No blocks queued or completed yet.</div>'
+            '<div class="progress-empty">No blocks queued or completed yet.</div>'
         )
     else:
         done, remaining, total, pct = counted
+        eta = _eta_text(storage, remaining)
+        eta_html = f'<div class="progress-eta">{html.escape(eta)}</div>' if eta else ""
         progress_block = f"""
-        <div class="ring" style="--pct:{pct}">
-          <div class="ring-pct">{pct}%</div>
+        <div class="progress-top">
+          <span class="progress-pct">{pct}%</span>
+          <div class="progress-track"><div class="progress-fill" style="width:{pct}%"></div></div>
         </div>
         <div class="stat-row">
           <div class="stat"><span class="stat-n">{done}</span><span class="stat-l">done</span></div>
           <div class="stat"><span class="stat-n">{remaining}</span><span class="stat-l">remaining</span></div>
           <div class="stat"><span class="stat-n">{total}</span><span class="stat-l">total</span></div>
         </div>
+        {eta_html}
         """
 
     live = bool(live_key)
@@ -646,19 +703,19 @@ def generate(
     box-shadow: 0 0 8px {color};
   }}
   .status-detail {{ margin-top: 0.75rem; color: var(--muted); font-size: 0.9rem; line-height: 1.4; }}
-  .ring {{
-    --size: 168px;
-    width: var(--size); height: var(--size);
-    border-radius: 50%;
-    margin: 0.25rem auto 1.5rem;
-    display: flex; align-items: center; justify-content: center;
-    background:
-      radial-gradient(closest-side, var(--card) 76%, transparent 77% 100%),
-      conic-gradient(var(--accent) calc(var(--pct) * 1%), var(--border) 0);
+  .progress-top {{ display: flex; align-items: center; gap: 0.85rem; }}
+  .progress-pct {{ font-size: 1.15rem; font-weight: 700; min-width: 3ch; text-align: right; }}
+  .progress-track {{
+    flex: 1; height: 10px; border-radius: 999px; background: var(--border);
+    overflow: hidden;
   }}
-  .ring-pct {{ font-size: 2.1rem; font-weight: 700; }}
-  .ring-empty {{ text-align: center; color: var(--muted); padding: 2rem 0; }}
-  .stat-row {{ display: flex; justify-content: space-around; text-align: center; }}
+  .progress-fill {{
+    height: 100%; border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  }}
+  .progress-empty {{ text-align: center; color: var(--muted); padding: 0.5rem 0; }}
+  .progress-eta {{ margin-top: 0.65rem; text-align: center; font-size: 0.8rem; color: var(--muted); }}
+  .stat-row {{ display: flex; justify-content: space-around; text-align: center; margin-top: 0.9rem; }}
   .stat {{ display: flex; flex-direction: column; }}
   .stat-n {{ font-size: 1.3rem; font-weight: 700; }}
   .stat-l {{ font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }}
@@ -766,14 +823,14 @@ def generate(
     {control_section}
     <div id="cards">
     <section class="card">
-      <h2>Status</h2>
-      <span class="badge"><span class="dot"></span>{html.escape(status_label)}</span>
-      <div class="status-detail">{html.escape(status_detail)}</div>
+      <h2>Overall progress</h2>
+      {progress_block}
     </section>
 
     <section class="card">
-      <h2>Overall progress</h2>
-      {progress_block}
+      <h2>Status</h2>
+      <span class="badge"><span class="dot"></span>{html.escape(status_label)}</span>
+      <div class="status-detail">{html.escape(status_detail)}</div>
     </section>
 
     {phases_section}

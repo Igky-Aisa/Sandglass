@@ -53,6 +53,71 @@ def test_generate_shows_overall_progress(tmp_path, storage):
     assert ">3<" in html  # total
 
 
+def test_overall_progress_card_comes_before_status(tmp_path, storage):
+    """The operator watches this card while a queue is running -- it belongs
+    above the fold, not below the status pill."""
+    html = dashboard.generate(_source(tmp_path), "My Project", storage=storage)
+    assert html.index("Overall progress") < html.index(">Status<")
+
+
+def test_eta_shown_once_history_gives_a_recent_pace(tmp_path, storage):
+    from datetime import datetime, timedelta, timezone
+
+    source = _source(tmp_path)
+    _write(source, "First block\n\n====\n\nSecond block\n")
+
+    now = datetime.now(timezone.utc)
+    completed = [
+        {"completed_at": (now - timedelta(minutes=10 - i * 5)).isoformat()}
+        for i in range(3)
+    ]
+    storage.save_json(storage.history_path, {"completed": completed})
+
+    html = dashboard.generate(source, "My Project", storage=storage)
+
+    assert "ETA" in html
+
+
+def test_eta_absent_with_fewer_than_two_completions(tmp_path, storage):
+    """One timestamp has no gap to measure a pace from, so no ETA is better
+    than a guess presented as one."""
+    source = _source(tmp_path)
+    _write(source, "First block\n\n====\n\nSecond block\n")
+    storage.save_json(
+        storage.history_path,
+        {"completed": [{"completed_at": "2026-09-11T12:00:00+00:00"}]},
+    )
+
+    html = dashboard.generate(source, "My Project", storage=storage)
+
+    assert "ETA" not in html
+
+
+def test_eta_absent_when_nothing_remains(tmp_path, storage):
+    source = _source(tmp_path)
+    _write(source, "")
+    _write(
+        os.path.join(os.path.dirname(source), "prompt_history.md"),
+        "# History\n\n---\n\n## Done one\n\nstuff\n",
+    )
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    storage.save_json(
+        storage.history_path,
+        {
+            "completed": [
+                {"completed_at": (now - timedelta(minutes=5)).isoformat()},
+                {"completed_at": now.isoformat()},
+            ]
+        },
+    )
+
+    html = dashboard.generate(source, "My Project", storage=storage)
+
+    assert "ETA" not in html
+
+
 def test_generate_omits_phases_section_when_no_block_declares_one(tmp_path, storage):
     source = _source(tmp_path)
     _write(source, "Just a plain block\n")

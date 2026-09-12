@@ -1018,10 +1018,18 @@ sandglass dashboard              # writes .sandglass/dashboard.html and opens it
 sandglass dashboard --no-open    # just write the file, don't launch a browser
 ```
 
-It shows the same overall done/remaining/total as `Progress.md`, plus the
-current run state (idle, running, waiting out a quota, or stopped with why),
-and — if any block in the queue sets a `phase:` (see §4) — a bar per phase
-so you can see which stage of a larger project is furthest along.
+**Overall progress is the first card on the page** — a slim bar with the
+percentage, the same done/remaining/total as `Progress.md`, and, once a couple
+of blocks have completed, an **ETA** (`ETA ~1h 20m (around 14:32 UTC)`) worked
+out from how fast the last few blocks actually ran. It's a short-term estimate,
+not a promise — a quota wait or a switch to a slower model changes the pace it's
+based on, and it stays hidden until there's enough recent history to estimate
+from at all.
+
+Below that is the current run state (idle, running, waiting out a quota, or
+stopped with why), and — if any block in the queue sets a `phase:` (see §4) —
+a bar per phase so you can see which stage of a larger project is furthest
+along.
 
 If you run with pooled accounts (§6), it also shows an **Accounts** panel: one
 line per subscription, green for ready, amber for spent with the time it comes

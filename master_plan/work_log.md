@@ -2,6 +2,21 @@
 
 > Older entries live in `master_plan/archive/work_log_archive_2026-08-23.md`. This file keeps the most recent 5 so reading it stays cheap; consult the archive only when you need history older than that.
 
+## 2026-09-11 - Sonnet 5 - Dashboard's progress card: reordered, shortened, ETA added
+
+### 1. Context Snapshot
+- **Goal**: Operator asked for the Overall Progress card to be shorter/horizontal, moved to the top of the page, and to get an ETA.
+- **State**: `sandglass/dashboard.py` (`_eta_text`, `_format_duration`, `generate`), `tests/test_dashboard.py`.
+- **Previous Blocker**: None — no ETA had ever existed in the dashboard; confirmed via `git log --all --grep=eta` before building it fresh.
+
+### 2. Work Done
+- Replaced the 168px conic-gradient ring + `.stat-row` with a slim `.progress-track` bar and a compact stat row — same information, far less vertical space, and it now reads left-to-right instead of needing its own visual anchor.
+- Card order in `generate()`'s template changed: Overall progress now renders before Status. It's the thing worth glancing at during a live run; the status pill is secondary.
+- `_eta_text` computes pace from the gaps between the **last 10** `completed_at` timestamps in `.sandglass/history.json` (not the markdown `prompt_history.md` `throughput()` reads — a different, execution-engine-owned file), rather than one block's own duration, which swings too wildly (retries, quota waits, provider switches) to trust alone. Multiplies the average gap by `remaining` for an ETA seconds figure, formats as `~1h 20m`, and states an absolute `(around HH:MM UTC)`. Returns `""` — card omits it entirely — below 2 completions or when nothing remains.
+
+### 3. Next Steps (For the next agent)
+- The 10-completion window is a guess at "recent enough to reflect current conditions." If ETAs look wildly wrong in practice (e.g. right after a provider/account switch skews the average), consider weighting toward the most recent few instead of a flat window.
+
 ## 2026-09-11 - Opus 5 - Park reached the file but never the running queue
 
 ### 1. Context Snapshot
