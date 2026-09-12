@@ -88,6 +88,9 @@ class Provider:
     tiers: dict[str, str]
     default_model: str
     docs_url: str
+    # Pricing per 1M tokens: {"model_id": {"input": $, "output": $}}
+    # Used to estimate costs accurately instead of using Anthropic rates.
+    pricing: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def resolve_model(self, tier_or_model: Optional[str]) -> str:
         """Turn `pro`, `flash`, or a literal model id into a model id.
@@ -149,6 +152,19 @@ class Provider:
         env.pop(TOKEN_ENV_VAR, None)
         return env
 
+    def estimate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        """Estimate cost in USD for this provider, given token counts.
+
+        Falls back to input_tokens + output_tokens if no pricing is available.
+        """
+        model_pricing = self.pricing.get(model)
+        if not model_pricing:
+            # No pricing data -- fallback to Anthropic-like estimate
+            return (input_tokens + output_tokens * 3) / 1_000_000
+        input_cost = (input_tokens / 1_000_000) * model_pricing.get("input", 0)
+        output_cost = (output_tokens / 1_000_000) * model_pricing.get("output", 0)
+        return input_cost + output_cost
+
 
 # DeepSeek publishes an Anthropic-compatible endpoint precisely for this.
 # Model ids per their docs: `claude-opus*` maps to deepseek-v4-pro and
@@ -177,6 +193,10 @@ DEEPSEEK = Provider(
     },
     default_model="deepseek-v4-flash",
     docs_url="https://api-docs.deepseek.com/guides/anthropic_api",
+    pricing={
+        "deepseek-v4-pro": {"input": 0.27, "output": 1.1},
+        "deepseek-v4-flash": {"input": 0.014, "output": 0.056},
+    },
 )
 
 PROVIDERS: dict[str, Provider] = {DEEPSEEK.name: DEEPSEEK}

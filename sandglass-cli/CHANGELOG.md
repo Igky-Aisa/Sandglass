@@ -10,6 +10,10 @@
 - **A queue of entirely external blocks no longer refuses to start when every Claude account is parked**, which is a perfectly sensible way to run one: the per-block account check is skipped for a block that is going to a third-party endpoint, since it needs no Claude credential at all. Relatedly, a vendor running out of credit while every account is parked or unusable now stops with a message instead of entering an hourglass wait for a refresh that cannot come.
 - **An account that is *shut* now rotates instead of killing the queue.** `Your organization has disabled Claude subscription access for Claude Code` matched no classifier, fell through to a plain `RuntimeError`, and ended a 20-block queue at 04:30 with two healthy accounts sitting unused beside it. New `AccountUnusableError` (a revoked or expired token, a deactivated account, an org that has turned Claude Code off) is neither a quota — no clock brings it back — nor a transient blip, so retrying it on a five-minute timer would only spend a quarter of an hour reaching the same refusal. The account is dropped **for this run only**, in memory: the fix is a human re-opening it or parking it on purpose, and a run that wrote `enabled: false` into somebody's accounts file on the strength of one error string would be making a bigger decision than it looks. It is named in the run summary with the exact command to park it, and pushed as a notification. With no pool configured there is no second credential to try, so it still surfaces as the end of the run.
 
+### Changed
+
+- **DeepSeek cost estimation now uses actual provider rates instead of Anthropic rates.** Added `pricing` table to `Provider` dataclass; DeepSeek (pro: $0.27/$1.10 per M in/out tokens, flash: $0.014/$0.056) now displays accurate costs. External blocks with provider pricing show `(deepseek's rates)` instead of `at Anthropic rates estimate`.
+
 ## [0.11.3] - 2026-09-11
 
 ### Fixed

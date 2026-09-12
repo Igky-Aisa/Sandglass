@@ -1689,14 +1689,19 @@ class ExecutionEngine:
 
         response.prompt_id = prompt.id
         elapsed_min = (time.monotonic() - start) / 60
-        # On an external block the CLI still prices the run off Anthropic's
-        # table, because that is the only table it has -- so the figure is an
-        # order-of-magnitude stand-in, not a bill. Said out loud rather than
-        # printed as if it were money actually owed.
-        cost = (
-            f"${response.cost_usd:.2f}" if not routed
-            else f"~${response.cost_usd:.2f} at Anthropic rates, not {routed[0].name}'s"
-        )
+        # On an external block, recalculate cost using the provider's actual rates
+        # if pricing data is available, otherwise use Anthropic's rates as estimate.
+        if routed and routed[0].pricing:
+            actual_cost = routed[0].estimate_cost(
+                response.model, response.input_tokens, response.output_tokens
+            )
+            response.cost_usd = actual_cost
+            cost = f"${actual_cost:.2f} ({routed[0].name}'s rates)"
+        else:
+            cost = (
+                f"${response.cost_usd:.2f}" if not routed
+                else f"~${response.cost_usd:.2f} at Anthropic rates estimate"
+            )
         console.print(
             f"  ✅ Done ({response.tokens_used:,} tokens billed, "
             f"{cost}, {elapsed_min:.1f} min)"
